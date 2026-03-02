@@ -1,30 +1,39 @@
+import os
+import psycopg2
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import sqlite3
-import os
 
+# ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("bot.db", check_same_thread=False)
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not set")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL not set")
+
+# ================= DATABASE =================
+conn = psycopg2.connect(DATABASE_URL)
+conn.autocommit = True
 cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
+    user_id BIGINT PRIMARY KEY,
     name TEXT,
     age TEXT,
     gender TEXT,
-    country TEXT
+    country TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
-conn.commit()
 
-# ---------------- MEMORY ----------------
+# ================= MEMORY =================
 waiting_users = []
 active_chats = {}
 
-# ---------------- KEYBOARDS ----------------
+# ================= KEYBOARDS =================
 main_keyboard = ReplyKeyboardMarkup(
     [["/find", "/next", "/stop"]],
     resize_keyboard=True
@@ -36,55 +45,48 @@ gender_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ---------------- START ----------------
+# ================= ADMIN =================
+ADMIN_ID = 123456789  # 🔥 Replace with your Telegram ID
+
+
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     user = cursor.fetchone()
 
     if user:
-        await update.message.reply_text("Welcome back!", reply_markup=main_keyboard)
+        await update.message.reply_text(
+            "Welcome back!",
+            reply_markup=main_keyboard
+        )
         return
 
     context.user_data["step"] = "name"
     await update.message.reply_text("Welcome! What is your name?")
 
-# ---------------- MAIN MESSAGE HANDLER ----------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ================= PROFILE SETUP =================
+async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     existing_user = cursor.fetchone()
 
-    # ---------------- IF USER IS REGISTERED ----------------
+    # Already registered
     if existing_user:
-
-        # If not connected
-        if user_id not in active_chats:
-            await update.message.reply_text(
-                "❌ You are not currently connected.\nPress /find to connect."
-            )
-            return
-
-        partner = active_chats.get(user_id)
-
-        # If partner disconnected
-        if not partner or partner not in active_chats:
-            await update.message.reply_text(
-                "❌ Partner disconnected. Press /find again."
-            )
-            return
-
-        # Forward ANY message type (text, photo, sticker, etc.)
-        try:
+        if user_id in active_chats:
+            partner = active_chats[user_id]
             await update.message.copy(chat_id=partner)
-        except:
-            await update.message.reply_text("⚠️ Failed to send message.")
+        else:
+            await update.message.reply_text(
+                "❌ You are not currently connected.\nPress /find to connect.",
+                reply_markup=main_keyboard
+            )
         return
 
-    # ---------------- REGISTRATION FLOW ----------------
     step = context.user_data.get("step")
 
     if step == "name":
@@ -94,7 +96,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "age":
-        if not text or not text.isdigit():
+        if not text.isdigit():
             await update.message.reply_text("Enter valid age:")
             return
         context.user_data["age"] = text
@@ -118,33 +120,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "country":
-        cursor.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
-            (
-                user_id,
-                context.user_data["name"],
-                context.user_data["age"],
-                context.user_data["gender"],
-                text
-            )
-        )
-        conn.commit()
+        cursor.execute("""
+        INSERT INTO users (user_id, name, age, gender, country)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        """, (
+            user_id,
+            context.user_data["name"],
+            context.user_data["age"],
+            context.user_data["gender"],
+            text
+        ))
 
         context.user_data.clear()
 
         await update.message.reply_text(
-            "Profile saved successfully!",
+            "Profile saved permanently!",
             reply_markup=main_keyboard
         )
         return
 
-    await update.message.reply_text("Type /start to begin.")
 
-# ---------------- FIND ----------------
+# ================= FIND =================
 async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     user = cursor.fetchone()
 
     if not user:
@@ -159,14 +160,13 @@ async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_users.remove(user_id)
 
     partner = None
-    for waiting_user in waiting_users:
-        if waiting_user != user_id:
-            partner = waiting_user
+    for w in waiting_users:
+        if w != user_id:
+            partner = w
             break
 
     if partner:
         waiting_users.remove(partner)
-
         active_chats[user_id] = partner
         active_chats[partner] = user_id
 
@@ -176,13 +176,13 @@ async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_users.append(user_id)
         await update.message.reply_text("Waiting for partner...")
 
-# ---------------- STOP ----------------
+
+# ================= STOP =================
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_id in active_chats:
         partner = active_chats[user_id]
-
         del active_chats[user_id]
         del active_chats[partner]
 
@@ -191,16 +191,15 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("You are not in chat.")
 
-# ---------------- NEXT ----------------
+
+# ================= NEXT =================
 async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_id in active_chats:
         partner = active_chats[user_id]
-
         del active_chats[user_id]
         del active_chats[partner]
-
         await context.bot.send_message(partner, "Stranger skipped.")
 
     if user_id in waiting_users:
@@ -208,14 +207,37 @@ async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await find(update, context)
 
-# ---------------- RUN ----------------
+
+# ================= ADMIN VIEW USERS =================
+async def view_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    cursor.execute("SELECT user_id, name, age, gender, country FROM users")
+    users = cursor.fetchall()
+
+    if not users:
+        await update.message.reply_text("No users found.")
+        return
+
+    msg = "Registered Users:\n\n"
+    for u in users:
+        msg += f"{u[0]} | {u[1]} | {u[2]} | {u[3]} | {u[4]}\n"
+
+    await update.message.reply_text(msg[:4000])
+
+
+# ================= RUN =================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("next", next_chat))
+app.add_handler(CommandHandler("users", view_users))
 
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, collect_data))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
 
 app.run_polling()
