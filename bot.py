@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -18,14 +19,28 @@ conn = psycopg2.connect(DATABASE_URL)
 conn.autocommit = True
 cursor = conn.cursor()
 
+# USERS TABLE
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
+    username TEXT,
     name TEXT,
     age TEXT,
     gender TEXT,
     country TEXT,
+    total_messages INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# MESSAGE LOG TABLE
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    sender_id BIGINT,
+    receiver_id BIGINT,
+    content TEXT,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
@@ -46,39 +61,57 @@ gender_keyboard = ReplyKeyboardMarkup(
 )
 
 # ================= ADMIN =================
-ADMIN_ID = 123456789  # 🔥 Replace with your Telegram ID
+ADMIN_ID = 643086953  # 🔥 Replace with your Telegram ID
 
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    user = update.message.from_user
+    user_id = user.id
 
     cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    user = cursor.fetchone()
+    existing = cursor.fetchone()
 
-    if user:
+    if existing:
         await update.message.reply_text(
-            "Welcome back!",
+            "Welcome back!\n\n⚠️ Chats may be monitored for safety.",
             reply_markup=main_keyboard
         )
         return
 
     context.user_data["step"] = "name"
-    await update.message.reply_text("Welcome! What is your name?")
+    context.user_data["username"] = user.username
+
+    await update.message.reply_text(
+        "Welcome!\n⚠️ Chats may be monitored for safety.\n\nWhat is your name?"
+    )
 
 
 # ================= PROFILE SETUP =================
 async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    user = update.message.from_user
+    user_id = user.id
     text = update.message.text
 
     cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    existing_user = cursor.fetchone()
+    existing = cursor.fetchone()
 
-    # Already registered
-    if existing_user:
+    # Already registered → normal chat
+    if existing:
         if user_id in active_chats:
             partner = active_chats[user_id]
+
+            # Log message
+            cursor.execute("""
+            INSERT INTO messages (sender_id, receiver_id, content)
+            VALUES (%s, %s, %s)
+            """, (user_id, partner, text))
+
+            cursor.execute("""
+            UPDATE users SET total_messages = total_messages + 1
+            WHERE user_id=%s
+            """, (user_id,))
+
             await update.message.copy(chat_id=partner)
         else:
             await update.message.reply_text(
@@ -109,23 +142,19 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Select using buttons.")
             return
 
-        gender = "Male" if text == "👨 Male" else "Female"
-        context.user_data["gender"] = gender
+        context.user_data["gender"] = "Male" if text == "👨 Male" else "Female"
         context.user_data["step"] = "country"
 
-        await update.message.reply_text(
-            "Enter your country:",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
         return
 
     if step == "country":
         cursor.execute("""
-        INSERT INTO users (user_id, name, age, gender, country)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (user_id) DO NOTHING
+        INSERT INTO users (user_id, username, name, age, gender, country)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             user_id,
+            context.user_data["username"],
             context.user_data["name"],
             context.user_data["age"],
             context.user_data["gender"],
@@ -138,19 +167,11 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Profile saved permanently!",
             reply_markup=main_keyboard
         )
-        return
 
 
 # ================= FIND =================
 async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-
-    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    user = cursor.fetchone()
-
-    if not user:
-        await update.message.reply_text("Complete profile first with /start")
-        return
 
     if user_id in active_chats:
         await update.message.reply_text("You are already chatting.")
@@ -192,38 +213,48 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not in chat.")
 
 
-# ================= NEXT =================
-async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-
-    if user_id in active_chats:
-        partner = active_chats[user_id]
-        del active_chats[user_id]
-        del active_chats[partner]
-        await context.bot.send_message(partner, "Stranger skipped.")
-
-    if user_id in waiting_users:
-        waiting_users.remove(user_id)
-
-    await find(update, context)
-
-
-# ================= ADMIN VIEW USERS =================
-async def view_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= ANALYTICS =================
+async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Not authorized.")
         return
 
-    cursor.execute("SELECT user_id, name, age, gender, country FROM users")
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    total_messages = cursor.fetchone()[0]
+
+    cursor.execute("""
+    SELECT COUNT(*) FROM users
+    WHERE created_at > NOW() - INTERVAL '24 HOURS'
+    """)
+    new_today = cursor.fetchone()[0]
+
+    await update.message.reply_text(
+        f"📊 Analytics\n\n"
+        f"Total Users: {total_users}\n"
+        f"New (24h): {new_today}\n"
+        f"Total Messages: {total_messages}"
+    )
+
+
+# ================= VIEW USERS =================
+async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    cursor.execute("""
+    SELECT user_id, username, name, country, total_messages
+    FROM users
+    ORDER BY created_at DESC
+    LIMIT 20
+    """)
+
     users = cursor.fetchall()
 
-    if not users:
-        await update.message.reply_text("No users found.")
-        return
-
-    msg = "Registered Users:\n\n"
+    msg = "Latest Users:\n\n"
     for u in users:
-        msg += f"{u[0]} | {u[1]} | {u[2]} | {u[3]} | {u[4]}\n"
+        msg += f"{u[0]} | @{u[1]} | {u[2]} | {u[3]} | msgs:{u[4]}\n"
 
     await update.message.reply_text(msg[:4000])
 
@@ -234,10 +265,9 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
-app.add_handler(CommandHandler("next", next_chat))
-app.add_handler(CommandHandler("users", view_users))
+app.add_handler(CommandHandler("analytics", analytics))
+app.add_handler(CommandHandler("users", users_list))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, collect_data))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
 
 app.run_polling()
