@@ -259,7 +259,7 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(CommandHandler("users", users_list))
-
+    
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
 
-app.run_polling()
+app.run_polling(drop_pending_updates=True)
