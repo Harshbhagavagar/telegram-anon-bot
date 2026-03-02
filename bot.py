@@ -5,7 +5,6 @@ import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -51,18 +50,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "name"
     await update.message.reply_text("Welcome! What is your name?")
 
-
-# ---------------- PROFILE SETUP ----------------
-async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------- MAIN MESSAGE HANDLER ----------------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
     cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     existing_user = cursor.fetchone()
 
+    # ---------------- IF USER IS REGISTERED ----------------
     if existing_user:
+
+        # If not connected
+        if user_id not in active_chats:
+            await update.message.reply_text(
+                "❌ You are not currently connected.\nPress /find to connect."
+            )
+            return
+
+        partner = active_chats.get(user_id)
+
+        # If partner disconnected
+        if not partner or partner not in active_chats:
+            await update.message.reply_text(
+                "❌ Partner disconnected. Press /find again."
+            )
+            return
+
+        # Forward ANY message type (text, photo, sticker, etc.)
+        try:
+            await update.message.copy(chat_id=partner)
+        except:
+            await update.message.reply_text("⚠️ Failed to send message.")
         return
 
+    # ---------------- REGISTRATION FLOW ----------------
     step = context.user_data.get("step")
 
     if step == "name":
@@ -72,7 +94,7 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "age":
-        if not text.isdigit():
+        if not text or not text.isdigit():
             await update.message.reply_text("Enter valid age:")
             return
         context.user_data["age"] = text
@@ -89,7 +111,10 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["gender"] = gender
         context.user_data["step"] = "country"
 
-        await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Enter your country:",
+            reply_markup=ReplyKeyboardRemove()
+        )
         return
 
     if step == "country":
@@ -113,6 +138,7 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    await update.message.reply_text("Type /start to begin.")
 
 # ---------------- FIND ----------------
 async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,7 +176,6 @@ async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_users.append(user_id)
         await update.message.reply_text("Waiting for partner...")
 
-
 # ---------------- STOP ----------------
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -165,7 +190,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(partner, "Stranger left the chat.")
     else:
         await update.message.reply_text("You are not in chat.")
-
 
 # ---------------- NEXT ----------------
 async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,29 +208,6 @@ async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await find(update, context)
 
-
-# ---------------- MESSAGE + MEDIA HANDLER ----------------
-async def relay_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-
-    if user_id not in active_chats:
-        await update.message.reply_text("❌ You are not currently connected.\nPress /find to connect.")
-        return
-
-    partner = active_chats.get(user_id)
-
-    # If partner disconnected unexpectedly
-    if not partner or partner not in active_chats:
-        await update.message.reply_text("❌ Partner disconnected. Press /find to connect again.")
-        return
-
-    # Forward message safely
-    try:
-        await update.message.copy(chat_id=partner)
-    except:
-        await update.message.reply_text("⚠️ Failed to send message.")
-
-
 # ---------------- RUN ----------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -215,8 +216,6 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("next", next_chat))
 
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
-
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 app.run_polling()
-
