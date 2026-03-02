@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-ADMIN_ID = 643086953  # YOUR TELEGRAM NUMERIC ID
+ADMIN_ID = 643086953  # YOUR TELEGRAM ID
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not set")
@@ -69,7 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if existing:
         await update.message.reply_text(
-            "Welcome back!\n\nUse /find to connect.\n\n⚠️ Chats may be monitored for safety.",
+            "Welcome back!\nUse /find to connect.",
             reply_markup=main_keyboard
         )
         return
@@ -77,45 +77,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "name"
     context.user_data["username"] = user.username
 
-    await update.message.reply_text(
-        "Welcome!\n⚠️ Chats may be monitored for safety.\n\nWhat is your name?"
-    )
+    await update.message.reply_text("Welcome! What is your name?")
 
-# ================= PROFILE =================
-async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= REGISTRATION =================
+async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
-    text = update.message.text if update.message.text else ""
+    text = update.message.text
 
-    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    existing = cursor.fetchone()
-
-    # ================= CHAT MODE =================
-    if existing:
-        if user_id not in active_chats:
-            await update.message.reply_text(
-                "❌ You are not currently connected.\nPress /find to connect.",
-                reply_markup=main_keyboard
-            )
-            return
-
-        partner = active_chats[user_id]
-
-        # Log message
-        cursor.execute("""
-        INSERT INTO messages (sender_id, receiver_id, content)
-        VALUES (%s, %s, %s)
-        """, (user_id, partner, text))
-
-        cursor.execute("""
-        UPDATE users SET total_messages = total_messages + 1
-        WHERE user_id=%s
-        """, (user_id,))
-
-        await update.message.copy(chat_id=partner)
-        return
-
-    # ================= REGISTRATION =================
     step = context.user_data.get("step")
 
     if step == "name":
@@ -137,10 +106,8 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text not in ["👨 Male", "👩 Female"]:
             await update.message.reply_text("Use buttons.")
             return
-
         context.user_data["gender"] = "Male" if text == "👨 Male" else "Female"
         context.user_data["step"] = "country"
-
         await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
         return
 
@@ -148,6 +115,7 @@ async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("""
         INSERT INTO users (user_id, username, name, age, gender, country)
         VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
         """, (
             user_id,
             context.user_data["username"],
@@ -198,7 +166,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id in active_chats:
         partner = active_chats[user_id]
-
         del active_chats[user_id]
         del active_chats[partner]
 
@@ -207,7 +174,43 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("You are not in chat.")
 
-# ================= ADMIN ANALYTICS =================
+# ================= CHAT HANDLER =================
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    user_id = user.id
+
+    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+    existing = cursor.fetchone()
+
+    # If not registered → registration
+    if not existing:
+        await registration(update, context)
+        return
+
+    # If not connected
+    if user_id not in active_chats:
+        await update.message.reply_text(
+            "❌ You are not currently connected.\nPress /find to connect.",
+            reply_markup=main_keyboard
+        )
+        return
+
+    partner = active_chats[user_id]
+
+    # Log message
+    cursor.execute("""
+    INSERT INTO messages (sender_id, receiver_id, content)
+    VALUES (%s, %s, %s)
+    """, (user_id, partner, update.message.text or ""))
+
+    cursor.execute("""
+    UPDATE users SET total_messages = total_messages + 1
+    WHERE user_id=%s
+    """, (user_id,))
+
+    await update.message.copy(chat_id=partner)
+
+# ================= ANALYTICS =================
 async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
@@ -218,20 +221,11 @@ async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT COUNT(*) FROM messages")
     total_messages = cursor.fetchone()[0]
 
-    cursor.execute("""
-    SELECT COUNT(*) FROM users
-    WHERE created_at > NOW() - INTERVAL '24 HOURS'
-    """)
-    new_today = cursor.fetchone()[0]
-
     await update.message.reply_text(
-        f"📊 Analytics\n\n"
-        f"Total Users: {total_users}\n"
-        f"New (24h): {new_today}\n"
-        f"Total Messages: {total_messages}"
+        f"📊 Analytics\n\nUsers: {total_users}\nMessages: {total_messages}"
     )
 
-# ================= ADMIN USERS =================
+# ================= USERS =================
 async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
@@ -259,7 +253,7 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(CommandHandler("users", users_list))
-    
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
+
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, chat_handler))
 
 app.run_polling(drop_pending_updates=True)
