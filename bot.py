@@ -215,11 +215,7 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("next", next_chat))
 
-# Profile setup handler FIRST
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, collect_data))
-
-# Then relay all messages (media + text)
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_all))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, collect_data))
 
 
 app.run_polling()
