@@ -1,8 +1,10 @@
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import sqlite3
+import os
 
-BOT_TOKEN = "8554825101:AAFNMhmaW0jSf8DLaXesP2DzqGr0cAOmgTo"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -216,5 +218,6 @@ app.add_handler(CommandHandler("next", next_chat))
 # Text, photo, video, document, sticker etc
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_all))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, collect_data))
+
 
 app.run_polling()
