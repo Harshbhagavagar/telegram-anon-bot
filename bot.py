@@ -74,7 +74,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "name"
     await update.message.reply_text("Enter your name:")
 
-# ================= MATCH =================
+# ================= MATCH (FIXED LOGIC) =================
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
@@ -82,19 +82,38 @@ async def match_user(update, context, preferred_gender=None):
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
 
+    # get current user's gender
+    cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user_id,))
+    my_gender_row = cursor.fetchone()
+    if not my_gender_row:
+        return
+    my_gender = my_gender_row[0]
+
+    # ================= MUTUAL MATCHING =================
     if preferred_gender:
         cursor.execute("""
-        SELECT w.user_id FROM waiting_users w
-        JOIN users u ON w.user_id=u.user_id
-        WHERE u.gender=%s AND w.user_id!=%s
+        SELECT w.user_id
+        FROM waiting_users w
+        JOIN users u ON w.user_id = u.user_id
+        WHERE 
+            u.gender = %s
+            AND w.user_id != %s
+            AND (w.preferred_gender IS NULL OR w.preferred_gender = %s)
         LIMIT 1
-        """, (preferred_gender, user_id))
+        """, (preferred_gender, user_id, my_gender))
     else:
         cursor.execute("""
-        SELECT user_id FROM waiting_users
-        WHERE user_id!=%s
+        SELECT w.user_id
+        FROM waiting_users w
+        JOIN users u ON w.user_id = u.user_id
+        WHERE 
+            w.user_id != %s
+            AND (
+                w.preferred_gender IS NULL 
+                OR w.preferred_gender = %s
+            )
         LIMIT 1
-        """, (user_id,))
+        """, (user_id, my_gender))
 
     row = cursor.fetchone()
 
@@ -138,7 +157,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
-    # ===== REGISTRATION FLOW =====
+    # ===== REGISTRATION =====
     if context.user_data.get("step"):
         step = context.user_data["step"]
 
@@ -169,7 +188,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
             return
 
-    # ===== CHECK USER EXISTS =====
+    # ===== CHECK USER =====
     cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
     if cursor.fetchone() is None:
         await update.message.reply_text("Please use /start first.")
@@ -186,7 +205,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_vip = row[0] if row else False
 
         if not is_vip:
-            await update.message.reply_text("👑 VIP required. Contact admin @Random1204")
+            await update.message.reply_text("👑 VIP required.")
             return
 
         gender = "Male" if text == "Find Male" else "Female"
@@ -202,18 +221,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         return
 
-    # ===== FORWARD ALL MESSAGE TYPES =====
+    # ===== FORWARD =====
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
 
     if row:
         partner = row[0]
-
-        cursor.execute("""
-        UPDATE users SET total_messages = total_messages + 1
-        WHERE user_id=%s
-        """, (user_id,))
-
+        cursor.execute("UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s", (user_id,))
         await update.message.copy(chat_id=partner)
 
 # ================= ADMIN =================
@@ -228,7 +242,7 @@ async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_chats = cursor.fetchone()[0] // 2
 
     await update.message.reply_text(
-        f"📊 Analytics\n\nTotal Users: {total_users}\nActive Chats: {active_chats}"
+        f"📊 Users: {total_users}\nActive Chats: {active_chats}"
     )
 
 # ================= RUN =================
@@ -238,7 +252,4 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
-app.run_polling(
-    drop_pending_updates=True,
-    close_loop=False
-)
+app.run_polling(drop_pending_updates=True, close_loop=False)
