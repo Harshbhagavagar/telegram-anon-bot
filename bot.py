@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS active_chats (
 )
 """)
 
-# ================= KEYBOARD =================
+# ================= KEYBOARDS =================
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["Find Partner"],
@@ -60,23 +60,30 @@ gender_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
+# ================= SAFE USER CHECK =================
+def user_exists(user_id):
+    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
+    return cursor.fetchone() is not None
+
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    cursor.execute("SELECT * FROM users WHERE user_id=%s", (user.id,))
-    existing = cursor.fetchone()
 
-    if existing:
+    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user.id,))
+    if cursor.fetchone():
         await update.message.reply_text("Welcome back!", reply_markup=main_keyboard)
         return
 
     context.user_data["step"] = "name"
     await update.message.reply_text("Enter your name:")
 
+
 # ================= MATCH =================
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
+    # Clean previous states
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
 
@@ -98,15 +105,18 @@ async def match_user(update, context, preferred_gender=None):
 
     if row:
         partner = row[0]
-        cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
-        cursor.execute("INSERT INTO active_chats VALUES (%s, %s)", (user_id, partner))
-        cursor.execute("INSERT INTO active_chats VALUES (%s, %s)", (partner, user_id))
 
-        await context.bot.send_message(user_id, "Connected!")
-        await context.bot.send_message(partner, "Connected!")
+        cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
+        cursor.execute("INSERT INTO active_chats VALUES (%s,%s)", (user_id, partner))
+        cursor.execute("INSERT INTO active_chats VALUES (%s,%s)", (partner, user_id))
+
+        await context.bot.send_message(user_id, "✅ Connected!")
+        await context.bot.send_message(partner, "✅ Connected!")
+
     else:
-        cursor.execute("INSERT INTO waiting_users VALUES (%s, %s)", (user_id, preferred_gender))
-        await update.message.reply_text("Searching...")
+        cursor.execute("INSERT INTO waiting_users VALUES (%s,%s)", (user_id, preferred_gender))
+        await update.message.reply_text("🔎 Searching...")
+
 
 # ================= STOP =================
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,13 +134,22 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner,))
 
-    await context.bot.send_message(user_id, "Chat ended.", reply_markup=main_keyboard)
+    await context.bot.send_message(user_id, "❌ Chat ended.", reply_markup=main_keyboard)
     await context.bot.send_message(partner, "Stranger left.")
 
-# ================= UNIFIED MESSAGE HANDLER =================
+
+# ================= UNIFIED ROUTER =================
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user_id = update.message.from_user.id
     text = update.message.text
+
+    # ===== Prevent unregistered crash =====
+    if not user_exists(user_id):
+        await update.message.reply_text("Please use /start first.")
+        return
 
     # ===== REGISTRATION FLOW =====
     if context.user_data.get("step"):
@@ -151,7 +170,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == "country":
             cursor.execute("""
             INSERT INTO users (user_id, username, name, gender, country)
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s,%s,%s,%s,%s)
             """, (
                 user_id,
                 update.message.from_user.username,
@@ -160,7 +179,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text
             ))
             context.user_data.clear()
-            await update.message.reply_text("Registration complete!", reply_markup=main_keyboard)
+            await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
             return
 
     # ===== BUTTON ACTIONS =====
@@ -170,10 +189,12 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in ["Find Male", "Find Female"]:
         cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
-        is_vip = cursor.fetchone()[0]
+        row = cursor.fetchone()
+
+        is_vip = row[0] if row else False   # SAFE FIX
 
         if not is_vip:
-            await update.message.reply_text("VIP required.")
+            await update.message.reply_text("👑 VIP required. Contact admin.")
             return
 
         gender = "Male" if text == "Find Male" else "Female"
@@ -189,13 +210,21 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         return
 
-    # ===== CHAT MESSAGE FORWARDING =====
+    # ===== MESSAGE FORWARDING (ALL TYPES) =====
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
 
     if row:
         partner = row[0]
+
+        # Increase message counter
+        cursor.execute("""
+        UPDATE users SET total_messages = total_messages + 1
+        WHERE user_id=%s
+        """, (user_id,))
+
         await update.message.copy(chat_id=partner)
+
 
 # ================= ADMIN =================
 async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,7 +237,10 @@ async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT COUNT(*) FROM active_chats")
     active = cursor.fetchone()[0] // 2
 
-    await update.message.reply_text(f"Users: {total}\nActive: {active}")
+    await update.message.reply_text(
+        f"📊 Analytics\n\nTotal Users: {total}\nActive Chats: {active}"
+    )
+
 
 # ================= RUN =================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
