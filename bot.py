@@ -243,7 +243,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Find Male" or text == "Find Female":
         # VIP required for gender-specific
         if not is_vip(user_id):
-            await update.message.reply_text("👑 VIP required. Please contact admin.", reply_markup=main_keyboard)
+            await update.message.reply_text("👑 VIP required. Please contact admin.@Random1204", reply_markup=main_keyboard)
             return
 
         if get_partner_row(user_id):
