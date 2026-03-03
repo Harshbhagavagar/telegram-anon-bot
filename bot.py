@@ -62,16 +62,19 @@ gender_keyboard = ReplyKeyboardMarkup(
 )
 
 # ================= HELPERS =================
-def is_in_chat(user_id):
+def get_partner(user_id):
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     return cursor.fetchone()
+
+def user_exists(user_id):
+    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
+    return cursor.fetchone() is not None
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
 
-    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user.id,))
-    if cursor.fetchone():
+    if user_exists(user.id):
         await update.message.reply_text("Welcome back!", reply_markup=main_keyboard)
         return
 
@@ -79,17 +82,98 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "name"
     await update.message.reply_text("Enter your name:")
 
+# ================= MESSAGE ROUTER =================
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    user = update.message.from_user
+    user_id = user.id
+    text = update.message.text
+
+    # ===== REGISTRATION FLOW =====
+    if context.user_data.get("step"):
+
+        step = context.user_data["step"]
+
+        if step == "name":
+            context.user_data["name"] = text
+            context.user_data["step"] = "gender"
+            await update.message.reply_text("Select gender:", reply_markup=gender_keyboard)
+            return
+
+        if step == "gender":
+            if text not in ["Male", "Female"]:
+                await update.message.reply_text("Please choose Male or Female.")
+                return
+
+            context.user_data["gender"] = text
+            context.user_data["step"] = "country"
+            await update.message.reply_text("Enter country:", reply_markup=ReplyKeyboardRemove())
+            return
+
+        if step == "country":
+            cursor.execute("""
+            INSERT INTO users (user_id, username, name, gender, country)
+            VALUES (%s,%s,%s,%s,%s)
+            """, (
+                user_id,
+                user.username,
+                context.user_data["name"],
+                context.user_data["gender"],
+                text
+            ))
+
+            context.user_data.clear()
+            await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
+            return
+
+    # ===== BLOCK IF NOT REGISTERED =====
+    if not user_exists(user_id):
+        await update.message.reply_text("Please use /start first.")
+        return
+
+    # ===== BUTTON LOGIC =====
+    if text in ["Find Partner", "Find Male", "Find Female"]:
+        partner = get_partner(user_id)
+        if partner:
+            await update.message.reply_text(
+                "⚠️ You are already in a chat.\nPress Stop first.",
+                reply_markup=main_keyboard
+            )
+            return
+
+        preferred_gender = None
+        if text == "Find Male":
+            preferred_gender = "Male"
+        elif text == "Find Female":
+            preferred_gender = "Female"
+
+        await match_user(update, context, preferred_gender)
+        return
+
+    if text == "Stop":
+        await stop_chat(update, context)
+        return
+
+    if text == "Next":
+        await stop_chat(update, context)
+        await match_user(update, context)
+        return
+
+    # ===== CHAT FORWARDING =====
+    partner = get_partner(user_id)
+    if partner:
+        partner_id = partner[0]
+        cursor.execute(
+            "UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s",
+            (user_id,)
+        )
+        await update.message.copy(chat_id=partner_id)
+
 # ================= MATCH =================
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
-
-    # Prevent searching if already in chat
-    if is_in_chat(user_id):
-        await update.message.reply_text(
-            "⚠️ You are already in a chat.\nPress Stop first.",
-            reply_markup=main_keyboard
-        )
-        return
 
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
 
@@ -101,10 +185,9 @@ async def match_user(update, context, preferred_gender=None):
         SELECT w.user_id
         FROM waiting_users w
         JOIN users u ON w.user_id = u.user_id
-        WHERE 
-            u.gender = %s
-            AND w.user_id != %s
-            AND (w.preferred_gender IS NULL OR w.preferred_gender = %s)
+        WHERE u.gender=%s
+        AND w.user_id!=%s
+        AND (w.preferred_gender IS NULL OR w.preferred_gender=%s)
         LIMIT 1
         """, (preferred_gender, user_id, my_gender))
     else:
@@ -112,9 +195,8 @@ async def match_user(update, context, preferred_gender=None):
         SELECT w.user_id
         FROM waiting_users w
         JOIN users u ON w.user_id = u.user_id
-        WHERE 
-            w.user_id != %s
-            AND (w.preferred_gender IS NULL OR w.preferred_gender = %s)
+        WHERE w.user_id!=%s
+        AND (w.preferred_gender IS NULL OR w.preferred_gender=%s)
         LIMIT 1
         """, (user_id, my_gender))
 
@@ -136,86 +218,24 @@ async def match_user(update, context, preferred_gender=None):
 # ================= STOP =================
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    partner = get_partner(user_id)
 
-    row = is_in_chat(user_id)
-
-    if not row:
+    if not partner:
         await update.message.reply_text("Not connected.", reply_markup=main_keyboard)
         return
 
-    partner = row[0]
+    partner_id = partner[0]
 
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
-    cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner,))
+    cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner_id,))
 
     await context.bot.send_message(user_id, "❌ Chat ended.", reply_markup=main_keyboard)
-    await context.bot.send_message(partner, "Stranger left.")
+    await context.bot.send_message(partner_id, "Stranger left.")
 
-# ================= MESSAGE ROUTER =================
-async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
+# ================= RUN =================
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    user_id = update.message.from_user.id
-    text = update.message.text
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
-    # ===== REGISTRATION =====
-    if context.user_data.get("step"):
-        step = context.user_data["step"]
-
-        if step == "name":
-            context.user_data["name"] = text
-            context.user_data["step"] = "gender"
-            await update.message.reply_text("Select gender:", reply_markup=gender_keyboard)
-            return
-
-        if step == "gender":
-            context.user_data["gender"] = text
-            context.user_data["step"] = "country"
-            await update.message.reply_text("Enter country:", reply_markup=ReplyKeyboardRemove())
-            return
-
-        if step == "country":
-            cursor.execute("""
-            INSERT INTO users (user_id, username, name, gender, country)
-            VALUES (%s,%s,%s,%s,%s)
-            """, (
-                user_id,
-                update.message.from_user.username,
-                context.user_data["name"],
-                context.user_data["gender"],
-                text
-            ))
-            context.user_data.clear()
-            await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
-            return
-
-    # ===== CHECK USER =====
-    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
-    if cursor.fetchone() is None:
-        await update.message.reply_text("Please use /start first.")
-        return
-
-    # ===== BUTTON ACTIONS =====
-    if text in ["Find Partner", "Find Male", "Find Female"]:
-        await match_user(update, context,
-                         "Male" if text == "Find Male"
-                         else "Female" if text == "Find Female"
-                         else None)
-        return
-
-    if text == "Stop":
-        await stop_chat(update, context)
-        return
-
-    if text == "Next":
-        await stop_chat(update, context)
-        await match_user(update, context)
-        return
-
-    # ===== NORMAL CHAT FORWARDING =====
-    row = is_in_chat(user_id)
-    if row:
-        partner = row[0]
-        cursor.execute("UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s", (user_id,))
-        await update.message.copy(chat_id=partner)
+app.run_polling(drop_pending_updates=True, close_loop=False)
