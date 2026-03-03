@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -45,12 +46,18 @@ CREATE TABLE IF NOT EXISTS active_chats (
 )
 """)
 
+# ===== SAFE AUTO MIGRATION FOR REFERRAL =====
+cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
+cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INT DEFAULT 0")
+cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expiry TIMESTAMP")
+
 # ================= KEYBOARDS =================
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["Find Partner"],
         ["Find Male", "Find Female"],
-        ["Next", "Stop"]
+        ["Next", "Stop"],
+        ["My Referral"]
     ],
     resize_keyboard=True
 )
@@ -68,56 +75,82 @@ def user_exists(user_id: int) -> bool:
 
 def get_partner_row(user_id: int):
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
-    return cursor.fetchone()  # returns (partner_id,) or None
+    return cursor.fetchone()
 
 def is_vip(user_id: int) -> bool:
-    cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
+    cursor.execute("SELECT is_vip, vip_expiry FROM users WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
-    return bool(row[0]) if row else False
+    if not row:
+        return False
+    is_vip_flag, vip_expiry = row
+    if vip_expiry and vip_expiry > datetime.utcnow():
+        return True
+    return is_vip_flag
+
+def reward_referrer(referrer_id: int):
+    cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (referrer_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    count = row[0]
+
+    days = 0
+    if count == 3:
+        days = 3
+    elif count == 5:
+        days = 7
+    elif count == 10:
+        days = 30
+
+    if days > 0:
+        expiry = datetime.utcnow() + timedelta(days=days)
+        cursor.execute("UPDATE users SET vip_expiry=%s WHERE user_id=%s", (expiry, referrer_id))
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    user = update.message.from_user
 
-    if user_exists(user.id):
+    user = update.message.from_user
+    user_id = user.id
+
+    if user_exists(user_id):
         await update.message.reply_text("Welcome back!", reply_markup=main_keyboard)
         return
 
-    # Begin registration flow
+    referrer_id = None
+    if context.args:
+        try:
+            possible_ref = int(context.args[0])
+            if possible_ref != user_id:
+                cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (possible_ref,))
+                if cursor.fetchone():
+                    referrer_id = possible_ref
+        except:
+            pass
+
     context.user_data.clear()
     context.user_data["step"] = "name"
+    context.user_data["referrer"] = referrer_id
+
     await update.message.reply_text("Enter your name:")
 
-# ================= MATCH (mutual matching) =================
-async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, preferred_gender: str | None = None):
+# ================= MATCHING =================
+async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, preferred_gender=None):
     if not update.message:
         return
+
     user_id = update.message.from_user.id
 
-    # Prevent searching if already in chat
     if get_partner_row(user_id):
         await update.message.reply_text("⚠️ You are already in a chat. Press Stop first.", reply_markup=main_keyboard)
         return
 
-    # Remove any existing waiting row for this user
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
 
-    # Get current user's gender (needed for mutual matching)
     cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user_id,))
-    my_gender_row = cursor.fetchone()
-    if not my_gender_row:
-        # user must be registered; this should not happen because router checks, but safe guard
-        await update.message.reply_text("Please use /start first.")
-        return
-    my_gender = my_gender_row[0]
+    my_gender = cursor.fetchone()[0]
 
-    # Mutual matching SQL:
-    # If preferred_gender is provided (user asked specifically), find a waiting user who:
-    # - Has gender = preferred_gender
-    # - Is not the same user
-    # - And either has no preferred_gender or prefers my_gender (mutual)
     if preferred_gender:
         cursor.execute("""
             SELECT w.user_id
@@ -129,7 +162,6 @@ async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, preferr
             LIMIT 1
         """, (preferred_gender, user_id, my_gender))
     else:
-        # No specific preference: accept any waiting user who either has no preference or prefers my_gender
         cursor.execute("""
             SELECT w.user_id
             FROM waiting_users w
@@ -143,40 +175,36 @@ async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, preferr
 
     if row:
         partner = row[0]
-        # Create active chat pair
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
-        # Insert both directions. If there is a race, one insert might fail in rare cases; keep it simple:
-        cursor.execute("INSERT INTO active_chats (user_id, partner_id) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id", (user_id, partner))
-        cursor.execute("INSERT INTO active_chats (user_id, partner_id) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id", (partner, user_id))
+        cursor.execute("INSERT INTO active_chats (user_id, partner_id) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id", (user_id, partner))
+        cursor.execute("INSERT INTO active_chats (user_id, partner_id) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id", (partner, user_id))
 
         await context.bot.send_message(user_id, "✅ Connected!")
         await context.bot.send_message(partner, "✅ Connected!")
     else:
-        # No partner found: join waiting list
-        cursor.execute("INSERT INTO waiting_users (user_id, preferred_gender) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET preferred_gender = EXCLUDED.preferred_gender", (user_id, preferred_gender))
+        cursor.execute("INSERT INTO waiting_users (user_id, preferred_gender) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender", (user_id, preferred_gender))
         await update.message.reply_text("🔎 Searching...")
 
 # ================= STOP =================
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    user_id = update.message.from_user.id
 
+    user_id = update.message.from_user.id
     row = get_partner_row(user_id)
+
     if not row:
         await update.message.reply_text("Not connected.", reply_markup=main_keyboard)
         return
 
     partner_id = row[0]
-
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner_id,))
 
     await context.bot.send_message(user_id, "❌ Chat ended.", reply_markup=main_keyboard)
-    # partner might not be present (rare), wrap in try/except to avoid crash
     try:
         await context.bot.send_message(partner_id, "Stranger left.")
-    except Exception:
+    except:
         pass
 
 # ================= MESSAGE ROUTER =================
@@ -188,125 +216,102 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     text = update.message.text
 
-    # --- REGISTRATION FLOW FIRST ---
+    # ===== REGISTRATION =====
     if context.user_data.get("step"):
         step = context.user_data["step"]
 
         if step == "name":
-            # store name
             context.user_data["name"] = text
             context.user_data["step"] = "gender"
             await update.message.reply_text("Select gender:", reply_markup=gender_keyboard)
             return
 
         if step == "gender":
-            if text not in ("Male", "Female"):
-                await update.message.reply_text("Please choose Male or Female.", reply_markup=gender_keyboard)
-                return
             context.user_data["gender"] = text
             context.user_data["step"] = "country"
             await update.message.reply_text("Enter country:", reply_markup=ReplyKeyboardRemove())
             return
 
         if step == "country":
-            # insert user in DB
+            referrer_id = context.user_data.get("referrer")
+
             cursor.execute("""
-                INSERT INTO users (user_id, username, name, gender, country)
-                VALUES (%s,%s,%s,%s,%s)
+                INSERT INTO users (user_id, username, name, gender, country, referred_by)
+                VALUES (%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (user_id) DO NOTHING
             """, (
                 user_id,
                 user.username,
                 context.user_data["name"],
                 context.user_data["gender"],
-                text
+                text,
+                referrer_id
             ))
+
+            if referrer_id:
+                cursor.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id=%s", (referrer_id,))
+                reward_referrer(referrer_id)
+
             context.user_data.clear()
             await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
             return
 
-    # --- BLOCK if not registered ---
     if not user_exists(user_id):
         await update.message.reply_text("Please use /start first.")
         return
 
-    # --- BUTTONS: VIP check for gender-specific searches ---
-    # Determine if this is a gender-specific search
-    if text == "Find Partner":
-        # general search (allowed for all)
-        if get_partner_row(user_id):
-            await update.message.reply_text("⚠️ You are already in a chat. Press Stop first.", reply_markup=main_keyboard)
-            return
-        await match_user(update, context, None)
+    # ===== REFERRAL BUTTON =====
+    if text == "My Referral":
+        referral_link = f"https://t.me/{update.message.bot.username}?start={user_id}"
+        cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (user_id,))
+        count = cursor.fetchone()[0]
+
+        await update.message.reply_text(
+            f"🔗 Your Referral Link:\n{referral_link}\n\n"
+            f"👥 Referrals: {count}\n\n"
+            "🎁 3 invites = 3 days VIP\n"
+            "5 invites = 7 days VIP\n"
+            "10 invites = 30 days VIP"
+        )
         return
 
-    if text == "Find Male" or text == "Find Female":
-        # VIP required for gender-specific
+    # ===== MATCHING =====
+    if text == "Find Partner":
+        await match_user(update, context)
+        return
+
+    if text in ("Find Male", "Find Female"):
         if not is_vip(user_id):
-            await update.message.reply_text("👑 VIP required. Please contact admin.@Random1204", reply_markup=main_keyboard)
+            await update.message.reply_text("👑 VIP required. Contact admin.", reply_markup=main_keyboard)
             return
-
-        if get_partner_row(user_id):
-            await update.message.reply_text("⚠️ You are already in a chat. Press Stop first.", reply_markup=main_keyboard)
-            return
-
         preferred = "Male" if text == "Find Male" else "Female"
         await match_user(update, context, preferred)
         return
 
     if text == "Next":
-        # Next should stop current chat then search again (if not in chat, it will just search)
         if get_partner_row(user_id):
-            # stop current chat first
             await stop_chat(update, context)
-        # Now find new partner (no preference)
-        await match_user(update, context, None)
+        await match_user(update, context)
         return
 
     if text == "Stop":
         await stop_chat(update, context)
         return
 
-    # --- NORMAL CHAT: forward everything to partner if in chat ---
+    # ===== CHAT FORWARD =====
     partner_row = get_partner_row(user_id)
     if partner_row:
         partner_id = partner_row[0]
-        # update counters safely
-        try:
-            cursor.execute("UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s", (user_id,))
-        except Exception:
-            pass
-        # forward the message (works for all media types)
-        try:
-            await update.message.copy(chat_id=partner_id)
-        except Exception:
-            # if forwarding fails, notify user and cleanup maybe
-            await update.message.reply_text("Failed to forward message. Try again or press Stop.")
+        cursor.execute("UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s", (user_id,))
+        await update.message.copy(chat_id=partner_id)
         return
 
-    # If not in chat and message is non-button free text, optionally inform or ignore
-    # We'll inform user how to start
-    await update.message.reply_text("Use the keyboard to find a partner or press /start to (re)register.", reply_markup=main_keyboard)
-
-# ================= ADMIN ANALYTICS (optional) =================
-async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    if update.message.from_user.id != ADMIN_ID:
-        return
-
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM active_chats")
-    active_pairs = cursor.fetchone()[0] // 2
-
-    await update.message.reply_text(f"📊 Users: {total_users}\nActive chats: {active_pairs}")
+    await update.message.reply_text("Use keyboard below.", reply_markup=main_keyboard)
 
 # ================= RUN =================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
 app.run_polling(drop_pending_updates=True, close_loop=False)
