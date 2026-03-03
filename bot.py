@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = 643086953
+ADMIN_ID = 643086953  # Your Telegram ID
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not set")
@@ -55,14 +55,13 @@ CREATE TABLE IF NOT EXISTS messages (
 )
 """)
 
-# ================= KEYBOARDS =================
+# ================= KEYBOARD =================
 main_keyboard = ReplyKeyboardMarkup(
-    [["/find", "/next"], ["/stop"]],
-    resize_keyboard=True
-)
-
-vip_keyboard = ReplyKeyboardMarkup(
-    [["Match Male", "Match Female"], ["Random Match"]],
+    [
+        ["🚀 Find a partner"],
+        ["👩 Find a female", "👨 Find a male"],
+        ["⏹ Stop"]
+    ],
     resize_keyboard=True
 )
 
@@ -83,68 +82,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (user.id, user.username))
 
     cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user.id,))
-    if not cursor.fetchone()[0]:
-        await update.message.reply_text("Select your gender:", reply_markup=gender_keyboard)
+    result = cursor.fetchone()
+
+    if not result or not result[0]:
         context.user_data["set_gender"] = True
+        await update.message.reply_text("Select your gender:", reply_markup=gender_keyboard)
         return
 
     await update.message.reply_text("Welcome!", reply_markup=main_keyboard)
 
 # ================= SET GENDER =================
 async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("set_gender"):
-        gender = update.message.text
-        if gender not in ["Male", "Female"]:
-            return
-        cursor.execute("UPDATE users SET gender=%s WHERE user_id=%s",
-                       (gender, update.message.from_user.id))
-        context.user_data.clear()
-        await update.message.reply_text("Profile saved!", reply_markup=main_keyboard)
-
-# ================= FIND =================
-async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-
-    cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
-    is_vip = cursor.fetchone()[0]
-
-    if is_vip:
-        await update.message.reply_text("Choose match type:", reply_markup=vip_keyboard)
-    else:
-        await random_match(update, context)
-
-# ================= RANDOM MATCH =================
-async def random_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    await match_user(update, context, None)
-
-# ================= VIP GENDER MATCH =================
-async def vip_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-
-    cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
-    is_vip = cursor.fetchone()[0]
-
-    if not is_vip:
-        await update.message.reply_text("Please contact admin for VIP.")
+    gender = update.message.text
+    if gender not in ["Male", "Female"]:
         return
 
-    choice = update.message.text
+    cursor.execute("UPDATE users SET gender=%s WHERE user_id=%s",
+                   (gender, update.message.from_user.id))
+    context.user_data.clear()
 
-    if choice == "Match Male":
-        await match_user(update, context, "Male")
-    elif choice == "Match Female":
-        await match_user(update, context, "Female")
-    elif choice == "Random Match":
-        await match_user(update, context, None)
+    await update.message.reply_text("Profile saved!", reply_markup=main_keyboard)
 
 # ================= MATCH FUNCTION =================
 async def match_user(update, context, preferred_gender):
     user_id = update.message.from_user.id
 
+    # Remove existing state
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
 
+    # Try finding partner
     if preferred_gender:
         cursor.execute("""
         SELECT w.user_id FROM waiting_users w
@@ -161,24 +128,27 @@ async def match_user(update, context, preferred_gender):
 
     if row:
         partner = row[0]
+
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
         cursor.execute("INSERT INTO active_chats VALUES (%s, %s)", (user_id, partner))
         cursor.execute("INSERT INTO active_chats VALUES (%s, %s)", (partner, user_id))
-        await context.bot.send_message(user_id, "Connected!")
-        await context.bot.send_message(partner, "Connected!")
+
+        await context.bot.send_message(user_id, "✅ Connected!")
+        await context.bot.send_message(partner, "✅ Connected!")
     else:
         cursor.execute("INSERT INTO waiting_users VALUES (%s, %s)",
                        (user_id, preferred_gender))
-        await update.message.reply_text("Waiting for partner...")
+        await update.message.reply_text("🔎 Searching for partner...")
 
 # ================= STOP =================
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
+
     if not row:
-        await update.message.reply_text("Not connected.")
+        await update.message.reply_text("You are not connected.")
         return
 
     partner = row[0]
@@ -187,20 +157,43 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner,))
 
     await context.bot.send_message(user_id, "Chat ended.")
-    await context.bot.send_message(partner, "Stranger left.")
+    await context.bot.send_message(partner, "Stranger left the chat.")
 
-# ================= NEXT =================
-async def next_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await stop(update, context)
-    await random_match(update, context)
-
-# ================= CHAT =================
-async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= BUTTON HANDLER =================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    text = update.message.text
 
     if context.user_data.get("set_gender"):
         await set_gender(update, context)
         return
+
+    if text == "⏹ Stop":
+        await stop_chat(update, context)
+        return
+
+    if text == "🚀 Find a partner":
+        await match_user(update, context, None)
+        return
+
+    if text in ["👩 Find a female", "👨 Find a male"]:
+        cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
+        is_vip = cursor.fetchone()[0]
+
+        if not is_vip:
+            await update.message.reply_text(
+                "👑 Gender-based search is VIP feature.\nContact admin to upgrade."
+            )
+            return
+
+        if text == "👩 Find a female":
+            await match_user(update, context, "Female")
+        else:
+            await match_user(update, context, "Male")
+
+# ================= CHAT HANDLER =================
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
 
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
@@ -236,34 +229,42 @@ async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_users = cursor.fetchone()[0] // 2
 
     await update.message.reply_text(
-        f"Users: {total_users}\nActive Chats: {active_users}"
+        f"📊 Analytics\nUsers: {total_users}\nActive Chats: {active_users}"
     )
 
 async def make_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
-    user_id = int(context.args[0])
-    cursor.execute("UPDATE users SET is_vip=TRUE WHERE user_id=%s", (user_id,))
-    await update.message.reply_text("User is now VIP.")
+
+    if not context.args:
+        await update.message.reply_text("Usage: /vip user_id")
+        return
+
+    target = int(context.args[0])
+    cursor.execute("UPDATE users SET is_vip=TRUE WHERE user_id=%s", (target,))
+    await update.message.reply_text("User upgraded to VIP.")
 
 async def remove_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
-    user_id = int(context.args[0])
-    cursor.execute("UPDATE users SET is_vip=FALSE WHERE user_id=%s", (user_id,))
+
+    if not context.args:
+        await update.message.reply_text("Usage: /unvip user_id")
+        return
+
+    target = int(context.args[0])
+    cursor.execute("UPDATE users SET is_vip=FALSE WHERE user_id=%s", (target,))
     await update.message.reply_text("VIP removed.")
 
 # ================= RUN =================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("find", find))
-app.add_handler(CommandHandler("stop", stop))
-app.add_handler(CommandHandler("next", next_chat))
 app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(CommandHandler("vip", make_vip))
 app.add_handler(CommandHandler("unvip", remove_vip))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, vip_match))
+
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, chat_handler))
 
 app.run_polling(drop_pending_updates=True)
