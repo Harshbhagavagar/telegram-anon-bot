@@ -1,6 +1,6 @@
 import os
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -28,9 +28,6 @@ CREATE TABLE IF NOT EXISTS users (
     country TEXT,
     is_vip BOOLEAN DEFAULT FALSE,
     total_messages INT DEFAULT 0,
-    referred_by BIGINT,
-    referral_count INT DEFAULT 0,
-    vip_expiry TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -54,8 +51,7 @@ user_keyboard = ReplyKeyboardMarkup(
     [
         ["🚀 Find Partner"],
         ["👨 Find Male", "👩 Find Female"],
-        ["⏭ Next", "❌ Stop"],
-        ["🎁 My Referral"]
+        ["⏭ Next", "❌ Stop"]
     ],
     resize_keyboard=True
 )
@@ -85,14 +81,9 @@ def get_partner(user_id):
     return cursor.fetchone()
 
 def is_vip(user_id):
-    cursor.execute("SELECT is_vip, vip_expiry FROM users WHERE user_id=%s", (user_id,))
+    cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
-    if not row:
-        return False
-    vip_flag, expiry = row
-    if expiry and expiry > datetime.utcnow():
-        return True
-    return vip_flag
+    return row[0] if row else False
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,7 +105,7 @@ async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
     if get_partner(user_id):
-        await update.message.reply_text("⚠️ Already in chat. Press Stop first.")
+        await update.message.reply_text("⚠️ You are already in chat. Press Stop first.")
         return
 
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
@@ -151,13 +142,13 @@ async def match_user(update, context, preferred_gender=None):
         partner = partner_row[0]
 
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
-        cursor.execute("INSERT INTO active_chats VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id", (user_id, partner))
-        cursor.execute("INSERT INTO active_chats VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id", (partner, user_id))
+        cursor.execute("INSERT INTO active_chats VALUES (%s,%s)", (user_id, partner))
+        cursor.execute("INSERT INTO active_chats VALUES (%s,%s)", (partner, user_id))
 
         await context.bot.send_message(user_id, "✅ Connected!")
         await context.bot.send_message(partner, "✅ Connected!")
     else:
-        cursor.execute("INSERT INTO waiting_users VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender", (user_id, preferred_gender))
+        cursor.execute("INSERT INTO waiting_users VALUES (%s,%s)", (user_id, preferred_gender))
         await update.message.reply_text("🔎 Searching...")
 
 # ================= STOP =================
@@ -178,11 +169,14 @@ async def stop_chat(update, context):
 
 # ================= ROUTER =================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user = update.message.from_user
     user_id = user.id
-    text = update.message.text
+    text = update.message.text or ""
 
-    # ===== ADMIN PANEL =====
+    # ===== ADMIN =====
     if user_id == ADMIN_ID:
         if text == "📊 Analytics":
             cursor.execute("SELECT COUNT(*) FROM users")
@@ -201,7 +195,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "🕒 Waiting Users":
             cursor.execute("SELECT COUNT(*) FROM waiting_users")
             waiting = cursor.fetchone()[0]
-            await update.message.reply_text(f"Waiting: {waiting}")
+            await update.message.reply_text(f"Waiting Users: {waiting}")
             return
 
         if text == "⬅ Back":
@@ -238,25 +232,31 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ===== BUTTONS =====
-    if text == "🚀 Find Partner":
+    if "Find Partner" in text:
         await match_user(update, context)
         return
 
-    if text in ("👨 Find Male", "👩 Find Female"):
+    if "Find Male" in text:
         if not is_vip(user_id):
             await update.message.reply_text("👑 VIP required for gender search.")
             return
-        gender = "Male" if "Male" in text else "Female"
-        await match_user(update, context, gender)
+        await match_user(update, context, "Male")
         return
 
-    if text == "⏭ Next":
+    if "Find Female" in text:
+        if not is_vip(user_id):
+            await update.message.reply_text("👑 VIP required for gender search.")
+            return
+        await match_user(update, context, "Female")
+        return
+
+    if "Next" in text:
         if get_partner(user_id):
             await stop_chat(update, context)
         await match_user(update, context)
         return
 
-    if text == "❌ Stop":
+    if "Stop" in text:
         await stop_chat(update, context)
         return
 
@@ -264,8 +264,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     partner_row = get_partner(user_id)
     if partner_row:
         partner = partner_row[0]
-        cursor.execute("UPDATE users SET total_messages=total_messages+1 WHERE user_id=%s", (user_id,))
         await update.message.copy(chat_id=partner)
+        cursor.execute("UPDATE users SET total_messages=total_messages+1 WHERE user_id=%s", (user_id,))
         return
 
 # ================= RUN =================
