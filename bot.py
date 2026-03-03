@@ -262,9 +262,12 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== REFERRAL BUTTON =====
     if text == "My Referral":
-        referral_link = f"https://t.me/{update.message.bot.username}?start={user_id}"
+        bot_username = context.bot.username
+        referral_link = f"https://t.me/{bot_username}?start={user_id}"
         cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (user_id,))
-        count = cursor.fetchone()[0]
+        cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (user_id,))
+        row = cursor.fetchone()
+        count = row[0] if row else 0
 
         await update.message.reply_text(
             f"🔗 Your Referral Link:\n{referral_link}\n\n"
