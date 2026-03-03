@@ -61,10 +61,10 @@ gender_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# ================= HELPER =================
+# ================= HELPERS =================
 def is_in_chat(user_id):
-    cursor.execute("SELECT 1 FROM active_chats WHERE user_id=%s", (user_id,))
-    return cursor.fetchone() is not None
+    cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
+    return cursor.fetchone()
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -83,7 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
-    # Safety check
+    # Prevent searching if already in chat
     if is_in_chat(user_id):
         await update.message.reply_text(
             "⚠️ You are already in a chat.\nPress Stop first.",
@@ -91,14 +91,11 @@ async def match_user(update, context, preferred_gender=None):
         )
         return
 
-    # remove old waiting state
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
 
-    # get user gender
     cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user_id,))
     my_gender = cursor.fetchone()[0]
 
-    # mutual matching
     if preferred_gender:
         cursor.execute("""
         SELECT w.user_id
@@ -140,8 +137,7 @@ async def match_user(update, context, preferred_gender=None):
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
-    row = cursor.fetchone()
+    row = is_in_chat(user_id)
 
     if not row:
         await update.message.reply_text("Not connected.", reply_markup=main_keyboard)
@@ -200,69 +196,26 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please use /start first.")
         return
 
-    # ===== CHAT LOCK PROTECTION =====
-    if is_in_chat(user_id) and text != "Stop":
-        await update.message.reply_text(
-            "⚠️ You are already in a chat.\nPress Stop first.",
-            reply_markup=main_keyboard
-        )
-        return
-
-    # ===== BUTTONS =====
-    if text == "Find Partner":
-        await match_user(update, context)
-        return
-
-    if text in ["Find Male", "Find Female"]:
-        cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
-        row = cursor.fetchone()
-        is_vip = row[0] if row else False
-
-        if not is_vip:
-            await update.message.reply_text("👑 VIP required.")
-            return
-
-        gender = "Male" if text == "Find Male" else "Female"
-        await match_user(update, context, gender)
-        return
-
-    if text == "Next":
-        await match_user(update, context)
+    # ===== BUTTON ACTIONS =====
+    if text in ["Find Partner", "Find Male", "Find Female"]:
+        await match_user(update, context,
+                         "Male" if text == "Find Male"
+                         else "Female" if text == "Find Female"
+                         else None)
         return
 
     if text == "Stop":
         await stop_chat(update, context)
         return
 
-    # ===== FORWARD =====
-    cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
-    row = cursor.fetchone()
+    if text == "Next":
+        await stop_chat(update, context)
+        await match_user(update, context)
+        return
 
+    # ===== NORMAL CHAT FORWARDING =====
+    row = is_in_chat(user_id)
     if row:
         partner = row[0]
         cursor.execute("UPDATE users SET total_messages = total_messages + 1 WHERE user_id=%s", (user_id,))
         await update.message.copy(chat_id=partner)
-
-# ================= ADMIN =================
-async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return
-
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM active_chats")
-    active_chats = cursor.fetchone()[0] // 2
-
-    await update.message.reply_text(
-        f"📊 Users: {total_users}\nActive Chats: {active_chats}"
-    )
-
-# ================= RUN =================
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("analytics", analytics))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
-
-app.run_polling(drop_pending_updates=True, close_loop=False)
