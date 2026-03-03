@@ -3,6 +3,7 @@ import psycopg2
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = 643086953
@@ -12,11 +13,11 @@ if not BOT_TOKEN:
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not set")
 
+# ================= DATABASE =================
 conn = psycopg2.connect(DATABASE_URL)
 conn.autocommit = True
 cursor = conn.cursor()
 
-# ================= TABLES =================
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
@@ -60,12 +61,6 @@ gender_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# ================= SAFE USER CHECK =================
-def user_exists(user_id):
-    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
-    return cursor.fetchone() is not None
-
-
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -75,15 +70,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Welcome back!", reply_markup=main_keyboard)
         return
 
+    context.user_data.clear()
     context.user_data["step"] = "name"
     await update.message.reply_text("Enter your name:")
-
 
 # ================= MATCH =================
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
-    # Clean previous states
+    # remove old states
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
 
@@ -91,13 +86,13 @@ async def match_user(update, context, preferred_gender=None):
         cursor.execute("""
         SELECT w.user_id FROM waiting_users w
         JOIN users u ON w.user_id=u.user_id
-        WHERE u.gender=%s AND w.user_id != %s
+        WHERE u.gender=%s AND w.user_id!=%s
         LIMIT 1
         """, (preferred_gender, user_id))
     else:
         cursor.execute("""
         SELECT user_id FROM waiting_users
-        WHERE user_id != %s
+        WHERE user_id!=%s
         LIMIT 1
         """, (user_id,))
 
@@ -112,11 +107,9 @@ async def match_user(update, context, preferred_gender=None):
 
         await context.bot.send_message(user_id, "✅ Connected!")
         await context.bot.send_message(partner, "✅ Connected!")
-
     else:
         cursor.execute("INSERT INTO waiting_users VALUES (%s,%s)", (user_id, preferred_gender))
         await update.message.reply_text("🔎 Searching...")
-
 
 # ================= STOP =================
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,19 +130,13 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(user_id, "❌ Chat ended.", reply_markup=main_keyboard)
     await context.bot.send_message(partner, "Stranger left.")
 
-
-# ================= UNIFIED ROUTER =================
+# ================= MESSAGE ROUTER =================
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
     user_id = update.message.from_user.id
     text = update.message.text
-
-    # ===== Prevent unregistered crash =====
-    if not user_exists(user_id):
-        await update.message.reply_text("Please use /start first.")
-        return
 
     # ===== REGISTRATION FLOW =====
     if context.user_data.get("step"):
@@ -182,7 +169,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Registration complete!", reply_markup=main_keyboard)
             return
 
-    # ===== BUTTON ACTIONS =====
+    # ===== CHECK USER EXISTS =====
+    cursor.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
+    if cursor.fetchone() is None:
+        await update.message.reply_text("Please use /start first.")
+        return
+
+    # ===== BUTTONS =====
     if text == "Find Partner":
         await match_user(update, context)
         return
@@ -190,8 +183,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["Find Male", "Find Female"]:
         cursor.execute("SELECT is_vip FROM users WHERE user_id=%s", (user_id,))
         row = cursor.fetchone()
-
-        is_vip = row[0] if row else False   # SAFE FIX
+        is_vip = row[0] if row else False
 
         if not is_vip:
             await update.message.reply_text("👑 VIP required. Contact admin.")
@@ -210,14 +202,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         return
 
-    # ===== MESSAGE FORWARDING (ALL TYPES) =====
+    # ===== FORWARD ALL MESSAGE TYPES =====
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s", (user_id,))
     row = cursor.fetchone()
 
     if row:
         partner = row[0]
 
-        # Increase message counter
         cursor.execute("""
         UPDATE users SET total_messages = total_messages + 1
         WHERE user_id=%s
@@ -225,22 +216,20 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.copy(chat_id=partner)
 
-
 # ================= ADMIN =================
 async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
 
     cursor.execute("SELECT COUNT(*) FROM users")
-    total = cursor.fetchone()[0]
+    total_users = cursor.fetchone()[0]
 
     cursor.execute("SELECT COUNT(*) FROM active_chats")
-    active = cursor.fetchone()[0] // 2
+    active_chats = cursor.fetchone()[0] // 2
 
     await update.message.reply_text(
-        f"📊 Analytics\n\nTotal Users: {total}\nActive Chats: {active}"
+        f"📊 Analytics\n\nTotal Users: {total_users}\nActive Chats: {active_chats}"
     )
-
 
 # ================= RUN =================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -249,4 +238,7 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("analytics", analytics))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
-app.run_polling(drop_pending_updates=True)
+app.run_polling(
+    drop_pending_updates=True,
+    close_loop=False
+)
