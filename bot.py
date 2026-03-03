@@ -61,6 +61,11 @@ gender_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
+# ================= HELPER =================
+def is_in_chat(user_id):
+    cursor.execute("SELECT 1 FROM active_chats WHERE user_id=%s", (user_id,))
+    return cursor.fetchone() is not None
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -74,22 +79,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "name"
     await update.message.reply_text("Enter your name:")
 
-# ================= MATCH (FIXED LOGIC) =================
+# ================= MATCH =================
 async def match_user(update, context, preferred_gender=None):
     user_id = update.message.from_user.id
 
-    # remove old states
-    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
-    cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (user_id,))
-
-    # get current user's gender
-    cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user_id,))
-    my_gender_row = cursor.fetchone()
-    if not my_gender_row:
+    # Safety check
+    if is_in_chat(user_id):
+        await update.message.reply_text(
+            "⚠️ You are already in a chat.\nPress Stop first.",
+            reply_markup=main_keyboard
+        )
         return
-    my_gender = my_gender_row[0]
 
-    # ================= MUTUAL MATCHING =================
+    # remove old waiting state
+    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (user_id,))
+
+    # get user gender
+    cursor.execute("SELECT gender FROM users WHERE user_id=%s", (user_id,))
+    my_gender = cursor.fetchone()[0]
+
+    # mutual matching
     if preferred_gender:
         cursor.execute("""
         SELECT w.user_id
@@ -108,10 +117,7 @@ async def match_user(update, context, preferred_gender=None):
         JOIN users u ON w.user_id = u.user_id
         WHERE 
             w.user_id != %s
-            AND (
-                w.preferred_gender IS NULL 
-                OR w.preferred_gender = %s
-            )
+            AND (w.preferred_gender IS NULL OR w.preferred_gender = %s)
         LIMIT 1
         """, (user_id, my_gender))
 
@@ -194,6 +200,14 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please use /start first.")
         return
 
+    # ===== CHAT LOCK PROTECTION =====
+    if is_in_chat(user_id) and text != "Stop":
+        await update.message.reply_text(
+            "⚠️ You are already in a chat.\nPress Stop first.",
+            reply_markup=main_keyboard
+        )
+        return
+
     # ===== BUTTONS =====
     if text == "Find Partner":
         await match_user(update, context)
@@ -213,7 +227,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "Next":
-        await stop_chat(update, context)
         await match_user(update, context)
         return
 
