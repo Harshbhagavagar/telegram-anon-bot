@@ -186,7 +186,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_vip = row[0] if row else False
 
         if not is_vip:
-            await update.message.reply_text("👑 VIP required. Contact admin.")
+            await update.message.reply_text("👑 VIP required. Contact admin @Random1204")
             return
 
         gender = "Male" if text == "Find Male" else "Female"
