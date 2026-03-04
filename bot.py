@@ -281,10 +281,14 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("step"):
 
+        # 🛡️ SHIELD 1: Reject stickers, photos, and voice notes
+        if not text:
+            await update.message.reply_text("⚠️ Please send text only during registration.")
+            return
+
         step=context.user_data["step"]
 
         if step=="name":
-
             context.user_data["name"]=text
             context.user_data["step"]="gender"
 
@@ -293,6 +297,11 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             return
 
         if step=="gender":
+
+            # 🛡️ SHIELD 2: Force them to use the buttons
+            if text not in ["Male", "Female"]:
+                await update.message.reply_text("⚠️ Please use the keyboard buttons to select Male or Female.", reply_markup=gender_keyboard)
+                return
 
             context.user_data["gender"]=text
             context.user_data["step"]="country"
@@ -327,6 +336,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             "✅ Registration complete!",reply_markup=user_keyboard)
 
             return
+
 
 # ===== VIP MENU =====
 
