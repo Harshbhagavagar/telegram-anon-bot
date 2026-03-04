@@ -168,6 +168,9 @@ async def match_user(update,context,preferred_gender=None):
 
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(user_id,))
 
+    cursor.execute("SELECT gender FROM users WHERE user_id=%s",(user_id,))
+    my_gender=cursor.fetchone()[0]
+
     if preferred_gender:
 
         cursor.execute("""
@@ -226,44 +229,6 @@ async def stop_chat(update,context):
     await context.bot.send_message(user_id,"❌ Chat ended.",reply_markup=user_keyboard)
     await context.bot.send_message(partner,"Stranger left.")
 
-# ================= TEMP VIP PROMOTION =================
-# DELETE THIS WHOLE SECTION AFTER PROMOTION ENDS
-
-async def vip_offer(context: ContextTypes.DEFAULT_TYPE):
-
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-
-    for u in users:
-
-        uid = u[0]
-
-        try:
-
-            link=f"https://t.me/{context.bot.username}?start={uid}"
-
-            await context.bot.send_message(
-                uid,
-                f"""🔥 LIMITED VIP OFFER (24 HOURS)
-
-Invite 3 friends and get
-
-💎 FREE VIP for 3 days
-
-VIP Benefits
-👩 Gender Filter
-⚡ Faster Matching
-
-Your Invite Link:
-{link}
-
-⏳ Offer ending soon!
-"""
-            )
-
-        except:
-            pass
-
 # ================= ROUTER =================
 
 async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
@@ -275,8 +240,99 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
     user_id=user.id
     text=update.message.text or ""
 
+# ===== ADMIN =====
+
+    if user_id==ADMIN_ID:
+
+        if text=="📊 Analytics":
+
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total=cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM active_chats")
+            active=cursor.fetchone()[0]//2
+
+            await update.message.reply_text(
+            f"👥 Total Users: {total}\n💬 Active Chats: {active}")
+
+            return
+
+        if text=="👥 Active Users":
+
+            cursor.execute("SELECT COUNT(*) FROM active_chats")
+            active=cursor.fetchone()[0]//2
+
+            await update.message.reply_text(f"Active Chats: {active}")
+            return
+
+        if text=="🕒 Waiting Users":
+
+            cursor.execute("SELECT COUNT(*) FROM waiting_users")
+            waiting=cursor.fetchone()[0]
+
+            await update.message.reply_text(f"Waiting Users: {waiting}")
+            return
+
+        if text=="⬅ Back":
+            await update.message.reply_text("Back",reply_markup=user_keyboard)
+            return
+
+# ===== REGISTRATION =====
+
+    if context.user_data.get("step"):
+
+        step=context.user_data["step"]
+
+        if step=="name":
+
+            context.user_data["name"]=text
+            context.user_data["step"]="gender"
+
+            await update.message.reply_text(
+            "Select gender:",reply_markup=gender_keyboard)
+            return
+
+        if step=="gender":
+
+            context.user_data["gender"]=text
+            context.user_data["step"]="country"
+
+            await update.message.reply_text(
+            "Enter country:",reply_markup=ReplyKeyboardRemove())
+            return
+
+        if step=="country":
+
+            ref=context.user_data.get("ref")
+
+            cursor.execute("""
+            INSERT INTO users(user_id,username,name,gender,country,referred_by)
+            VALUES(%s,%s,%s,%s,%s,%s)
+            """,(user_id,user.username,context.user_data["name"],
+            context.user_data["gender"],text,ref))
+
+            if ref:
+
+                cursor.execute("""
+                UPDATE users
+                SET referral_count=referral_count+1
+                WHERE user_id=%s
+                """,(ref,))
+
+                reward_referral(ref)
+
+            context.user_data.clear()
+
+            await update.message.reply_text(
+            "✅ Registration complete!",reply_markup=user_keyboard)
+
+            return
+
+# ===== VIP MENU =====
+
     if text=="💎 VIP":
-        await update.message.reply_text("VIP Menu:",reply_markup=vip_keyboard)
+        await update.message.reply_text(
+        "VIP Menu:",reply_markup=vip_keyboard)
         return
 
     if text=="🎁 Get FREE VIP":
@@ -287,34 +343,56 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         count=cursor.fetchone()[0]
 
         await update.message.reply_text(
-        f"""Invite friends using this link
+        f"Invite friends:\n{link}\n\nProgress: {count}/3\n3 invites = 3 days VIP")
 
-{link}
+        return
 
-Progress: {count}/3
-
-3 invites = FREE VIP"""
-        )
-
+    if text=="👑 Contact Admin":
+        await update.message.reply_text(
+        "Contact admin for VIP purchase.")
         return
 
     if text=="⬅ Back":
         await update.message.reply_text("Menu",reply_markup=user_keyboard)
         return
 
+# ===== BUTTONS =====
+
     if "Find Partner" in text:
         await match_user(update,context)
         return
 
+    if "Find Male" in text:
+
+        if not is_vip(user_id):
+            await update.message.reply_text("👑 VIP required.")
+            return
+
+        await match_user(update,context,"Male")
+        return
+
+    if "Find Female" in text:
+
+        if not is_vip(user_id):
+            await update.message.reply_text("👑 VIP required.")
+            return
+
+        await match_user(update,context,"Female")
+        return
+
     if "Next" in text:
+
         if get_partner(user_id):
             await stop_chat(update,context)
+
         await match_user(update,context)
         return
 
     if "Stop" in text:
         await stop_chat(update,context)
         return
+
+# ===== CHAT FORWARD =====
 
     partner_row=get_partner(user_id)
 
@@ -330,14 +408,13 @@ Progress: {count}/3
         WHERE user_id=%s
         """,(user_id,))
 
+        return
+
 # ================= RUN =================
 
 app=ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start",start))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,router))
-
-# SEND PROMO EVERY 3 HOURS
-app.job_queue.run_repeating(vip_offer, interval=10800, first=60)
 
 app.run_polling(drop_pending_updates=True)
