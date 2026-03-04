@@ -447,8 +447,19 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
         try:
             await update.message.copy(chat_id=partner)
-        except:
-            await update.message.reply_text("⚠️ Partner disconnected.")
+
+        except Exception as e:
+
+            # remove broken chat from database
+            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(user_id,))
+            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
+
+            await update.message.reply_text(
+                "⚠️ Partner disconnected. Searching new partner..."
+            )
+
+            # automatically search new partner
+            await match_user(update,context)
             return
 
         cursor.execute("""
@@ -456,7 +467,9 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         SET total_messages=total_messages+1
         WHERE user_id=%s
         """,(user_id,))
+
         return
+
 # ================= RUN =================
 
 app=ApplicationBuilder().token(BOT_TOKEN).build()
