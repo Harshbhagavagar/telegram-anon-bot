@@ -439,7 +439,6 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await stop_chat(update,context)
         return
 
-
 # ===== CHAT FORWARD =====
 
 partner = get_partner(user_id)
@@ -451,21 +450,22 @@ if partner:
 
     except Exception as e:
 
-        # remove broken chat from database
+        print("Forward error:", e)
+
+        # remove broken chat
         cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(user_id,))
         cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
 
-        await update.message.reply_text(
-            "⚠️ Partner disconnected. Searching new partner..."
-        )
+        try:
+            await update.message.reply_text("⚠️ Partner disconnected.")
+        except:
+            pass
 
-        # automatically search new partner
-        await match_user(update,context)
         return
 
     cursor.execute("""
     UPDATE users
-    SET total_messages=total_messages+1
+    SET total_messages = total_messages + 1
     WHERE user_id=%s
     """,(user_id,))
 
