@@ -409,12 +409,44 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         """,(user_id,))
 
         return
+        
+# ================= VIP PROMO BROADCAST =================
+
+async def vip_promo(context: ContextTypes.DEFAULT_TYPE):
+
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+
+    for u in users:
+
+        uid = u[0]
+
+        try:
+            await context.bot.send_message(
+                uid,
+                "🔥 24 HOUR VIP PROMOTION!\n\n"
+                "Invite 3 friends and get:\n"
+                "💎 FREE VIP for 3 days\n\n"
+                "Benefits:\n"
+                "👩 Gender Filter\n"
+                "⚡ Faster Match\n\n"
+                "Open VIP menu now:\n"
+                "Press 💎 VIP"
+            )
+
+        except:
+            pass
 
 # ================= RUN =================
 
-app=ApplicationBuilder().token(BOT_TOKEN).build()
+# ================= RUN =================
+
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start",start))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,router))
+
+# SEND PROMO EVERY 3 HOURS
+app.job_queue.run_repeating(vip_promo, interval=10800, first=60)
 
 app.run_polling(drop_pending_updates=True)
