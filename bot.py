@@ -335,7 +335,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         "VIP Menu:",reply_markup=vip_keyboard)
         return
 
-    if text=="🎁 Invite Friends":
+    if text=="🎁 Get FREE VIP":
 
         link=f"https://t.me/{context.bot.username}?start={user_id}"
 
