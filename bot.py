@@ -11,6 +11,7 @@ ADMIN_ID = 643086953
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not set")
+
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not set")
 
@@ -91,37 +92,45 @@ def user_exists(user_id):
     cursor.execute("SELECT 1 FROM users WHERE user_id=%s",(user_id,))
     return cursor.fetchone() is not None
 
+
 def get_partner(user_id):
     cursor.execute("SELECT partner_id FROM active_chats WHERE user_id=%s",(user_id,))
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    return row[0] if row else None
+
 
 def is_vip(user_id):
 
     cursor.execute("SELECT is_vip,vip_expiry FROM users WHERE user_id=%s",(user_id,))
-    row=cursor.fetchone()
+    row = cursor.fetchone()
 
     if not row:
         return False
 
-    vip=row[0]
-    expiry=row[1]
+    vip, expiry = row
 
     if vip:
         return True
 
-    if expiry and expiry>datetime.utcnow():
+    if expiry and expiry > datetime.utcnow():
         return True
 
     return False
 
+
 def reward_referral(user_id):
 
     cursor.execute("SELECT referral_count FROM users WHERE user_id=%s",(user_id,))
-    count=cursor.fetchone()[0]
+    row = cursor.fetchone()
 
-    if count>=3:
+    if not row:
+        return
 
-        expiry=datetime.utcnow()+timedelta(days=3)
+    count = row[0]
+
+    if count >= 3:
+
+        expiry = datetime.utcnow() + timedelta(days=3)
 
         cursor.execute("""
         UPDATE users
@@ -129,21 +138,24 @@ def reward_referral(user_id):
         WHERE user_id=%s
         """,(expiry,user_id))
 
+
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
-    user=update.message.from_user
-    user_id=user.id
+    user = update.message.from_user
+    user_id = user.id
+    username = user.username if user.username else ""
 
-    ref=None
+    ref = None
+
     if context.args:
         try:
-            ref=int(context.args[0])
+            ref = int(context.args[0])
         except:
             pass
 
-    if user_id==ADMIN_ID:
+    if user_id == ADMIN_ID:
         await update.message.reply_text("👑 Admin Panel",reply_markup=admin_keyboard)
         return
 
@@ -156,20 +168,18 @@ async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Enter your name:")
 
+
 # ================= MATCH =================
 
 async def match_user(update,context,preferred_gender=None):
 
-    user_id=update.message.from_user.id
+    user_id = update.message.from_user.id
 
     if get_partner(user_id):
         await update.message.reply_text("⚠️ Already chatting.")
         return
 
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(user_id,))
-
-    cursor.execute("SELECT gender FROM users WHERE user_id=%s",(user_id,))
-    my_gender=cursor.fetchone()[0]
 
     if preferred_gender:
 
@@ -191,43 +201,56 @@ async def match_user(update,context,preferred_gender=None):
         LIMIT 1
         """,(user_id,))
 
-    row=cursor.fetchone()
+    row = cursor.fetchone()
 
     if row:
 
-        partner=row[0]
+        partner = row[0]
 
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(partner,))
         cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(user_id,partner))
         cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(partner,user_id))
 
-        await context.bot.send_message(user_id,"✅ Connected!")
-        await context.bot.send_message(partner,"✅ Connected!")
+        try:
+            await context.bot.send_message(user_id,"✅ Connected!")
+        except:
+            pass
+
+        try:
+            await context.bot.send_message(partner,"✅ Connected!")
+        except:
+            pass
 
     else:
 
         cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)",(user_id,preferred_gender))
         await update.message.reply_text("🔎 Searching...")
 
+
 # ================= STOP =================
 
 async def stop_chat(update,context):
 
-    user_id=update.message.from_user.id
+    user_id = update.message.from_user.id
+    partner = get_partner(user_id)
 
-    row=get_partner(user_id)
-
-    if not row:
+    if not partner:
         await update.message.reply_text("Not connected.",reply_markup=user_keyboard)
         return
-
-    partner=row[0]
 
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(user_id,))
     cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
 
-    await context.bot.send_message(user_id,"❌ Chat ended.",reply_markup=user_keyboard)
-    await context.bot.send_message(partner,"Stranger left.")
+    try:
+        await context.bot.send_message(user_id,"❌ Chat ended.",reply_markup=user_keyboard)
+    except:
+        pass
+
+    try:
+        await context.bot.send_message(partner,"Stranger left.")
+    except:
+        pass
+
 
 # ================= ROUTER =================
 
@@ -236,31 +259,30 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    user=update.message.from_user
-    user_id=user.id
-    text=update.message.text or ""
+    user = update.message.from_user
+    user_id = user.id
+    text = update.message.text or ""
 
 # ===== ADMIN =====
 
-    if user_id==ADMIN_ID:
+    if user_id == ADMIN_ID:
 
         if text=="📊 Analytics":
 
             cursor.execute("SELECT COUNT(*) FROM users")
-            total=cursor.fetchone()[0]
+            total = cursor.fetchone()[0]
 
             cursor.execute("SELECT COUNT(*) FROM active_chats")
-            active=cursor.fetchone()[0]//2
+            active = cursor.fetchone()[0]//2
 
             await update.message.reply_text(
             f"👥 Total Users: {total}\n💬 Active Chats: {active}")
-
             return
 
         if text=="👥 Active Users":
 
             cursor.execute("SELECT COUNT(*) FROM active_chats")
-            active=cursor.fetchone()[0]//2
+            active = cursor.fetchone()[0]//2
 
             await update.message.reply_text(f"Active Chats: {active}")
             return
@@ -268,7 +290,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         if text=="🕒 Waiting Users":
 
             cursor.execute("SELECT COUNT(*) FROM waiting_users")
-            waiting=cursor.fetchone()[0]
+            waiting = cursor.fetchone()[0]
 
             await update.message.reply_text(f"Waiting Users: {waiting}")
             return
@@ -277,11 +299,11 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Back",reply_markup=user_keyboard)
             return
 
+
 # ===== REGISTRATION =====
 
     if context.user_data.get("step"):
 
-        # 🛡️ SHIELD 1: Reject stickers, photos, and voice notes
         if not text:
             await update.message.reply_text("⚠️ Please send text only during registration.")
             return
@@ -289,6 +311,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         step=context.user_data["step"]
 
         if step=="name":
+
             context.user_data["name"]=text
             context.user_data["step"]="gender"
 
@@ -298,16 +321,18 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
         if step=="gender":
 
-            # 🛡️ SHIELD 2: Force them to use the buttons
-            if text not in ["Male", "Female"]:
-                await update.message.reply_text("⚠️ Please use the keyboard buttons to select Male or Female.", reply_markup=gender_keyboard)
+            if text not in ["Male","Female"]:
+                await update.message.reply_text(
+                "⚠️ Please use the buttons.",
+                reply_markup=gender_keyboard)
                 return
 
             context.user_data["gender"]=text
             context.user_data["step"]="country"
 
             await update.message.reply_text(
-            "Enter country:",reply_markup=ReplyKeyboardRemove())
+            "Enter country:",
+            reply_markup=ReplyKeyboardRemove())
             return
 
         if step=="country":
@@ -317,8 +342,10 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             cursor.execute("""
             INSERT INTO users(user_id,username,name,gender,country,referred_by)
             VALUES(%s,%s,%s,%s,%s,%s)
-            """,(user_id,user.username,context.user_data["name"],
-            context.user_data["gender"],text,ref))
+            """,(user_id,user.username,
+            context.user_data["name"],
+            context.user_data["gender"],
+            text,ref))
 
             if ref:
 
@@ -333,8 +360,8 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
 
             await update.message.reply_text(
-            "✅ Registration complete!",reply_markup=user_keyboard)
-
+            "✅ Registration complete!",
+            reply_markup=user_keyboard)
             return
 
 
@@ -345,32 +372,39 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         "VIP Menu:",reply_markup=vip_keyboard)
         return
 
+
     if text=="🎁 Get FREE VIP":
 
         link=f"https://t.me/{context.bot.username}?start={user_id}"
 
         cursor.execute("SELECT referral_count FROM users WHERE user_id=%s",(user_id,))
-        count=cursor.fetchone()[0]
+        row=cursor.fetchone()
+
+        count=row[0] if row else 0
 
         await update.message.reply_text(
         f"Invite friends:\n{link}\n\nProgress: {count}/3\n3 invites = 3 days VIP")
-
         return
+
 
     if text=="👑 Contact Admin":
         await update.message.reply_text(
         "Contact admin for VIP purchase.")
         return
 
+
     if text=="⬅ Back":
-        await update.message.reply_text("Menu",reply_markup=user_keyboard)
+        await update.message.reply_text(
+        "Menu",reply_markup=user_keyboard)
         return
+
 
 # ===== BUTTONS =====
 
     if "Find Partner" in text:
         await match_user(update,context)
         return
+
 
     if "Find Male" in text:
 
@@ -381,6 +415,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await match_user(update,context,"Male")
         return
 
+
     if "Find Female" in text:
 
         if not is_vip(user_id):
@@ -390,6 +425,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await match_user(update,context,"Female")
         return
 
+
     if "Next" in text:
 
         if get_partner(user_id):
@@ -398,28 +434,31 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await match_user(update,context)
         return
 
+
     if "Stop" in text:
         await stop_chat(update,context)
         return
 
+
 # ===== CHAT FORWARD =====
 
-    partner_row=get_partner(user_id)
+    partner = get_partner(user_id)
 
-    if partner_row:
+    if partner:
 
-        partner=partner_row[0]
-
-        await update.message.copy(chat_id=partner)
+        try:
+            await update.message.copy(chat_id=partner)
+        except:
+            await update.message.reply_text("⚠️ Partner disconnected.")
+            return
 
         cursor.execute("""
         UPDATE users
         SET total_messages=total_messages+1
         WHERE user_id=%s
         """,(user_id,))
-
         return
-        
+
 
 # ================= RUN =================
 
