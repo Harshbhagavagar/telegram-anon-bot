@@ -56,15 +56,15 @@ user_keyboard = ReplyKeyboardMarkup(
 ["🚀 Find Partner"],
 ["👨 Find Male","👩 Find Female"],
 ["⏭ Next","❌ Stop"],
-["💎 VIP","🎁 Referral"]
+["💎 VIP"]
 ],
 resize_keyboard=True
 )
 
 vip_keyboard = ReplyKeyboardMarkup(
 [
-["🎁 Invite Friends"],
-["👑 Contact Admin"],
+["🎁 Get FREE VIP"],
+["👑 Contact Admin Id in Bio"],
 ["⬅ Back"]
 ],
 resize_keyboard=True
