@@ -155,47 +155,37 @@ async def match_user(update,context,pref=None):
 
     if row:
 
-        partner=row[0]
+    partner=row[0]
 
-        cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(partner,))
+    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(partner,))
 
-        cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(uid,partner))
-        cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(partner,uid))
+    cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(uid,partner))
+    cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(partner,uid))
 
-        await context.bot.send_message(uid,"✅ Connected!")
-        await context.bot.send_message(partner,"✅ Connected!")
+    await context.bot.send_message(uid,"✅ Connected!")
+    await context.bot.send_message(partner,"✅ Connected!")
 
-    else:
+else:
 
     cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)",(uid,pref))
 
     await update.message.reply_text("🔎 Searching for a partner...")
 
     async def invite_prompt():
-
         await asyncio.sleep(15)
 
         cursor.execute("SELECT 1 FROM waiting_users WHERE user_id=%s",(uid,))
         still_waiting = cursor.fetchone()
 
         if still_waiting:
-
             link = f"https://t.me/{context.bot.username}?start={uid}"
 
             await context.bot.send_message(
                 uid,
-f"""🔎 Still searching?
-
-Get **Priority Matching + Gender Filters FREE** by inviting 3 friends.
-
-Invite link:
-{link}
-
-Invite 3 friends and unlock 👑 VIP for 3 days!"""
+                f"🔎 Still searching?\n\nInvite 3 friends to unlock FREE VIP!\n{link}"
             )
 
     asyncio.create_task(invite_prompt())
-
 # ================= STOP =================
 
 async def stop_chat(update,context):
