@@ -210,33 +210,67 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User Menu",reply_markup=user_keyboard)
         return
 
-    if uid==ADMIN_ID:
+   if uid == ADMIN_ID:
 
-        if text=="📢 Announcement":
-            context.user_data["announce_mode"]=True
-            await update.message.reply_text("Send announcement message")
-            return
+    if text == "📊 Analytics":
 
-        if context.user_data.get("announce_mode"):
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total = cursor.fetchone()[0]
 
-            context.user_data["announce_mode"]=False
+        cursor.execute("SELECT COUNT(*) FROM active_chats")
+        active = cursor.fetchone()[0] // 2
 
-            cursor.execute("SELECT user_id FROM users")
-            users=cursor.fetchall()
+        await update.message.reply_text(
+            f"Users: {total}\nActive chats: {active}"
+        )
+        return
 
-            sent=0
 
-            for user in users:
-                try:
-                    await update.message.copy(chat_id=user[0])
-                    sent+=1
-                    await asyncio.sleep(0.05)
-                except:
-                    pass
+    if text == "👥 Active Users":
 
-            await update.message.reply_text(f"Announcement sent to {sent}")
-            return
+        cursor.execute("SELECT COUNT(*) FROM active_chats")
+        active = cursor.fetchone()[0] // 2
 
+        await update.message.reply_text(f"Active chats: {active}")
+        return
+
+
+    if text == "🕒 Waiting Users":
+
+        cursor.execute("SELECT COUNT(*) FROM waiting_users")
+        waiting = cursor.fetchone()[0]
+
+        await update.message.reply_text(f"Waiting users: {waiting}")
+        return
+
+
+    if text == "📢 Announcement":
+
+        context.user_data["announce_mode"] = True
+        await update.message.reply_text("Send announcement message")
+        return
+
+
+    if context.user_data.get("announce_mode"):
+
+        context.user_data["announce_mode"] = False
+
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+
+        sent = 0
+
+        for user in users:
+            try:
+                await update.message.copy(chat_id=user[0])
+                sent += 1
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+        await update.message.reply_text(f"Announcement sent to {sent}")
+        return
+        
     if text=="🚀 Find Partner":
         await match_user(update,context)
 
@@ -282,13 +316,15 @@ Invite 3 friends to unlock 👑 VIP for 3 days!
 """
 )
 
-    partner=get_partner(uid)
+    partner = get_partner(uid)
 
-    if partner and text not in ["🚀 Find Partner","👨 Find Male","👩 Find Female","⏭ Next","❌ Stop","💎 VIP","🎁 Get FREE VIP"]:
-        try:
-            await update.message.copy(chat_id=partner)
-        except:
-            pass
+blocked = ["🚀 Find Partner","👨 Find Male","👩 Find Female","⏭ Next","❌ Stop","💎 VIP","🎁 Get FREE VIP","📊 Analytics","👥 Active Users","🕒 Waiting Users","📢 Announcement","⬅ Back"]
+
+if partner and text not in blocked:
+    try:
+        await update.message.copy(chat_id=partner)
+    except:
+        pass
 
 # ================= START =================
 
