@@ -235,21 +235,33 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
             cursor.execute("SELECT COUNT(*) FROM waiting_users")
             await update.message.reply_text(f"Waiting users: {cursor.fetchone()[0]}")
             return
+ # already chatting protection
+if text in ["🚀 Find Partner","👨 Find Male","👩 Find Female"]:
 
-    if text=="🚀 Find Partner":
-        await match_user(update,context)
+    if get_partner(uid):
+        await update.message.reply_text(
+            "⚠️ You are already in a chat.\nPress ❌ Stop first."
+        )
+        return
 
-    elif text=="👨 Find Male":
-        if is_vip(uid):
-            await match_user(update,context,"Male")
-        else:
-            await update.message.reply_text("👑 VIP required")
 
-    elif text=="👩 Find Female":
-        if is_vip(uid):
-            await match_user(update,context,"Female")
-        else:
-            await update.message.reply_text("👑 VIP required")
+if text=="🚀 Find Partner":
+    await match_user(update,context)
+
+elif text=="👨 Find Male":
+
+    if is_vip(uid):
+        await match_user(update,context,"Male")
+    else:
+        await update.message.reply_text("👑 VIP required")
+
+elif text=="👩 Find Female":
+
+    if is_vip(uid):
+        await match_user(update,context,"Female")
+    else:
+        await update.message.reply_text("👑 VIP required")
+        
 
     elif text=="⏭ Next":
         await stop_chat(update,context)
