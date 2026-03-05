@@ -210,21 +210,22 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("User Menu",reply_markup=user_keyboard)
         return
 
-   if uid == ADMIN_ID:
+# ================= ADMIN =================
 
-    if text == "📊 Analytics":
+    if uid == ADMIN_ID:
 
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total = cursor.fetchone()[0]
+        if text == "📊 Analytics":
 
-        cursor.execute("SELECT COUNT(*) FROM active_chats")
-        active = cursor.fetchone()[0] // 2
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total = cursor.fetchone()[0]
 
-        await update.message.reply_text(
-            f"Users: {total}\nActive chats: {active}"
-        )
-        return
+            cursor.execute("SELECT COUNT(*) FROM active_chats")
+            active = cursor.fetchone()[0] // 2
 
+            await update.message.reply_text(
+                f"Users: {total}\nActive chats: {active}"
+            )
+            return
 
     if text == "👥 Active Users":
 
