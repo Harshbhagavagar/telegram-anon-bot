@@ -394,20 +394,34 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 # message forwarding
 
-    partner=get_partner(uid)
+    # message forwarding
 
-    if partner:
+partner = get_partner(uid)
 
-        try:
-            await update.message.copy(chat_id=partner)
+# block control buttons from being sent to partner
+if text in [
+"🚀 Find Partner",
+"👨 Find Male",
+"👩 Find Female",
+"⏭ Next",
+"❌ Stop",
+"💎 VIP",
+"🎁 Get FREE VIP",
+"⬅ Back"
+]:
+    return
 
-        except:
+if partner:
 
-            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
-            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
+    try:
+        await update.message.copy(chat_id=partner)
 
-            await update.message.reply_text("Partner disconnected")
+    except:
 
+        cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
+        cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
+
+        await update.message.reply_text("Partner disconnected")
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
