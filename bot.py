@@ -92,32 +92,22 @@ def is_vip(uid):
     vip, expiry = row
     return True if vip or (expiry and expiry > datetime.utcnow()) else False
 
-def reward_referral(uid):
-    cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (uid,))
-    row = cursor.fetchone()
-    if row and row[0] >= 3:
-        expiry = datetime.utcnow() + timedelta(days=3)
-        cursor.execute("UPDATE users SET vip_expiry=%s WHERE user_id=%s", (expiry, uid))
-
 # ================= ADMIN COMMANDS =================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID: return
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
-    
     msg = " ".join(context.args)
     cursor.execute("SELECT user_id FROM users")
     rows = cursor.fetchall()
-    
     sent = 0
     for r in rows:
         try:
             await context.bot.send_message(chat_id=r[0], text=msg)
             sent += 1
             await asyncio.sleep(0.05) 
-        except Exception:
-            continue
+        except Exception: continue
     await update.message.reply_text(f"✅ Sent to {sent} users")
 
 async def find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,18 +115,15 @@ async def find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /find <name or id>")
         return
-    
     q = context.args[0]
     if q.isdigit():
         cursor.execute("SELECT user_id, name, is_vip FROM users WHERE user_id=%s", (int(q),))
     else:
         cursor.execute("SELECT user_id, name, is_vip FROM users WHERE name ILIKE %s", (f"%{q}%",))
-    
     rows = cursor.fetchall()
     if not rows:
         await update.message.reply_text("❌ User not found")
         return
-
     for uid, name, vip in rows:
         status = "👑 VIP" if vip else "👤 Normal"
         btn_txt = "❌ Remove VIP" if vip else "💎 Make VIP"
@@ -149,11 +136,10 @@ async def vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     uid = int(data.split("_")[1])
-
     if data.startswith("vip_"):
         cursor.execute("UPDATE users SET is_vip=TRUE WHERE user_id=%s", (uid,))
         await query.edit_message_text(f"✅ User {uid} is now VIP")
-    elif data.startswith("unvip_"):
+    else:
         cursor.execute("UPDATE users SET is_vip=FALSE WHERE user_id=%s", (uid,))
         await query.edit_message_text(f"❌ VIP removed for {uid}")
 
@@ -161,13 +147,10 @@ async def vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def match_user(update, context, pref=None):
     uid = update.message.from_user.id
     if get_partner(uid): return
-    
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (uid,))
-    
     sql = "SELECT w.user_id FROM waiting_users w JOIN users u ON w.user_id=u.user_id WHERE u.gender=%s AND w.user_id!=%s ORDER BY w.entry_time ASC LIMIT 1" if pref else "SELECT user_id FROM waiting_users WHERE user_id!=%s ORDER BY entry_time ASC LIMIT 1"
     cursor.execute(sql, (pref, uid) if pref else (uid,))
     row = cursor.fetchone()
-
     if row:
         partner = row[0]
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
@@ -175,14 +158,8 @@ async def match_user(update, context, pref=None):
         await context.bot.send_message(uid, "✅ Connected!")
         await context.bot.send_message(partner, "✅ Connected!")
     else:
-        cursor.execute("""
-            INSERT INTO waiting_users (user_id, preferred_gender) 
-            VALUES (%s,%s) 
-            ON CONFLICT (user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender
-        """, (uid, pref))
-        await update.message.reply_text("🔎 Searching for a partner...")
-        
-        # Safely run timeout only if job_queue exists
+        cursor.execute("INSERT INTO waiting_users (user_id, preferred_gender) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender", (uid, pref))
+        await update.message.reply_text("🔎 Searching...")
         if context.job_queue:
             context.job_queue.run_once(match_timeout, 180, chat_id=uid, user_id=uid)
 
@@ -191,8 +168,7 @@ async def match_timeout(context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT 1 FROM waiting_users WHERE user_id=%s", (uid,))
     if cursor.fetchone():
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (uid,))
-        try:
-            await context.bot.send_message(uid, "⏱ No partner found. Try again later!", reply_markup=user_keyboard)
+        try: await context.bot.send_message(uid, "⏱ No partner found. Try again later!", reply_markup=user_keyboard)
         except Exception: pass
 
 async def stop_chat(update, context):
@@ -201,7 +177,7 @@ async def stop_chat(update, context):
     if not partner: return
     cursor.execute("DELETE FROM active_chats WHERE user_id IN (%s, %s)", (uid, partner))
     await context.bot.send_message(uid, "❌ Chat ended.", reply_markup=user_keyboard)
-    try: await context.bot.send_message(partner, "Stranger left the chat.", reply_markup=user_keyboard)
+    try: await context.bot.send_message(partner, "Stranger left.", reply_markup=user_keyboard)
     except Exception: pass
 
 # ================= ROUTER =================
@@ -209,13 +185,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     uid, text = update.message.from_user.id, update.message.text
 
-    # Fixed "Back" Logic to avoid spam
+    # --- FIX: Back Button Logic ---
     if text in ["⬅ Back", "Back"]:
         context.user_data.clear()
-        kb = admin_keyboard if uid == ADMIN_ID else user_keyboard
-        await update.message.reply_text("Main Menu", reply_markup=kb)
+        if uid == ADMIN_ID:
+            await update.message.reply_text("👑 Admin Main Menu", reply_markup=admin_keyboard)
+        else:
+            await update.message.reply_text("🏠 Returning to Main Menu", reply_markup=user_keyboard)
         return
 
+    # --- Admin Logic ---
     if uid == ADMIN_ID:
         if text == "📊 Analytics":
             cursor.execute("SELECT COUNT(*) FROM users")
@@ -224,40 +203,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             genders = dict(cursor.fetchall())
             cursor.execute("SELECT COUNT(*) FROM active_chats")
             active = cursor.fetchone()[0] // 2
-            msg = f"📊 BOT ANALYTICS\nUsers: {total}\nChats: {active}\n\n👨 Male: {genders.get('Male',0)}\n👩 Female: {genders.get('Female',0)}"
-            await update.message.reply_text(msg)
+            msg = f"📊 ANALYTICS\nUsers: {total}\nChats: {active}\n\n👨 Male: {genders.get('Male',0)}\n👩 Female: {genders.get('Female',0)}"
+            await update.message.reply_text(msg, reply_markup=admin_keyboard)
             return
         if text == "👥 Active Users":
             cursor.execute("SELECT COUNT(*) FROM active_chats")
-            await update.message.reply_text(f"Active Chats: {cursor.fetchone()[0]//2}")
+            await update.message.reply_text(f"Active: {cursor.fetchone()[0]//2}", reply_markup=admin_keyboard)
             return
         if text == "🕒 Waiting Users":
             cursor.execute("SELECT COUNT(*) FROM waiting_users")
-            await update.message.reply_text(f"Waiting Users: {cursor.fetchone()[0]}")
+            await update.message.reply_text(f"Waiting: {cursor.fetchone()[0]}", reply_markup=admin_keyboard)
             return
 
-    if context.user_data.get("step"):
-        step = context.user_data["step"]
-        if step == "name":
-            context.user_data.update({"name": text, "step": "gender"})
-            await update.message.reply_text("Select gender:", reply_markup=gender_keyboard)
-        elif step == "gender":
-            gen = text.capitalize()
-            if gen not in ["Male", "Female"]:
-                await update.message.reply_text("⚠️ Use buttons.", reply_markup=gender_keyboard)
-                return
-            context.user_data.update({"gender": gen, "step": "country"})
-            await update.message.reply_text("Enter country:", reply_markup=ReplyKeyboardRemove())
-        elif step == "country":
-            ref = context.user_data.get("ref")
-            cursor.execute("INSERT INTO users(user_id,username,name,gender,country,referred_by) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (uid, update.message.from_user.username, context.user_data["name"], context.user_data["gender"], text, ref))
-            if ref:
-                cursor.execute("UPDATE users SET referral_count=referral_count+1 WHERE user_id=%s", (ref,))
-                reward_referral(ref)
-            context.user_data.clear()
-            await update.message.reply_text("✅ Registration complete!", reply_markup=user_keyboard)
-        return
-
+    # --- User Logic ---
     if text == "🚀 Find Partner": await match_user(update, context)
     elif text == "👨 Find Male": 
         if is_vip(uid): await match_user(update, context, "Male")
@@ -269,13 +227,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         await match_user(update, context)
     elif text == "❌ Stop": await stop_chat(update, context)
-    elif text == "💎 VIP": await update.message.reply_text("VIP Features", reply_markup=vip_keyboard)
+    elif text == "💎 VIP": await update.message.reply_text("💎 VIP Menu", reply_markup=vip_keyboard)
     elif text == "🎁 Get FREE VIP":
         cursor.execute("SELECT referral_count FROM users WHERE user_id=%s", (uid,))
         row = cursor.fetchone()
         c = row[0] if row else 0
-        await update.message.reply_text(f"Link: https://t.me/{context.bot.username}?start={uid}\nProgress: {c}/3")
+        await update.message.reply_text(f"Link: https://t.me/{context.bot.username}?start={uid}\nProgress: {c}/3", reply_markup=vip_keyboard)
     
+    # --- FIX: Contact Admin Logic ---
+    elif text == "👑 Contact Admin":
+        await update.message.reply_text("👑 Contact Admin for VIP: @Random1204", reply_markup=vip_keyboard)
+        return
+
+    # --- Chat Forwarding ---
     partner = get_partner(uid)
     if partner:
         try: await update.message.copy(chat_id=partner)
@@ -287,19 +251,17 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= RUN =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
-    ref = int(context.args[0]) if context.args and context.args[0].isdigit() else None
     if uid == ADMIN_ID:
-        await update.message.reply_text("Admin", reply_markup=admin_keyboard)
+        await update.message.reply_text("👑 Admin Panel", reply_markup=admin_keyboard)
         return
     if user_exists(uid):
-        await update.message.reply_text("Welcome!", reply_markup=user_keyboard)
+        await update.message.reply_text("🏠 Main Menu", reply_markup=user_keyboard)
         return
-    context.user_data["step"], context.user_data["ref"] = "name", ref
-    await update.message.reply_text("Enter name:")
+    await update.message.reply_text("Welcome! Click '🚀 Find Partner' to start chatting.")
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# FIXED: Check if job_queue exists before starting to avoid crash
+# Start JobQueue ONLY if it exists to prevent 'NoneType' crash
 if app.job_queue:
     app.job_queue.start()
 
@@ -309,4 +271,6 @@ app.add_handler(CommandHandler("find", find_user))
 app.add_handler(CallbackQueryHandler(vip_toggle))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
 
+
 app.run_polling(drop_pending_updates=True)
+
