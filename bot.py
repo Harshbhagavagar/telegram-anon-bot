@@ -317,16 +317,30 @@ Invite 3 friends to unlock 👑 VIP for 3 days!
 """
 )
 
-    partner = get_partner(uid)
+  partner = get_partner(uid)
 
-blocked = ["🚀 Find Partner","👨 Find Male","👩 Find Female","⏭ Next","❌ Stop","💎 VIP","🎁 Get FREE VIP","📊 Analytics","👥 Active Users","🕒 Waiting Users","📢 Announcement","⬅ Back"]
+blocked = [
+    "🚀 Find Partner",
+    "👨 Find Male",
+    "👩 Find Female",
+    "⏭ Next",
+    "❌ Stop",
+    "💎 VIP",
+    "🎁 Get FREE VIP",
+    "📊 Analytics",
+    "👥 Active Users",
+    "🕒 Waiting Users",
+    "📢 Announcement",
+    "⬅ Back"
+]
 
 if partner and text not in blocked:
     try:
         await update.message.copy(chat_id=partner)
     except:
-        pass
-
+        cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (uid,))
+        cursor.execute("DELETE FROM active_chats WHERE user_id=%s", (partner,))
+        await update.message.reply_text("Partner disconnected")
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
