@@ -133,60 +133,74 @@ async def broadcast(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 # ================= MATCH =================
 
-async def match_user(update,context,pref=None):
+async def match_user(update, context, pref=None):
 
-    uid=update.message.from_user.id
+    uid = update.message.from_user.id
 
     if get_partner(uid):
         return
 
-    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(uid,))
+    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (uid,))
 
     if pref:
         cursor.execute("""
-        SELECT w.user_id FROM waiting_users w
-        JOIN users u ON w.user_id=u.user_id
-        WHERE u.gender=%s AND w.user_id!=%s LIMIT 1
-        """,(pref,uid))
+            SELECT w.user_id FROM waiting_users w
+            JOIN users u ON w.user_id = u.user_id
+            WHERE u.gender = %s AND w.user_id != %s LIMIT 1
+        """, (pref, uid))
     else:
-        cursor.execute("SELECT user_id FROM waiting_users WHERE user_id!=%s LIMIT 1",(uid,))
-        
-row = cursor.fetchone()
+        cursor.execute(
+            "SELECT user_id FROM waiting_users WHERE user_id != %s LIMIT 1",
+            (uid,)
+        )
 
-if row:
+    row = cursor.fetchone()
 
-    partner = row[0]
+    if row:
 
-    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(partner,))
+        partner = row[0]
 
-    cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(uid,partner))
-    cursor.execute("INSERT INTO active_chats VALUES(%s,%s)",(partner,uid))
+        cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (partner,))
 
-    await context.bot.send_message(uid,"✅ Connected!")
-    await context.bot.send_message(partner,"✅ Connected!")
+        cursor.execute("INSERT INTO active_chats VALUES(%s,%s)", (uid, partner))
+        cursor.execute("INSERT INTO active_chats VALUES(%s,%s)", (partner, uid))
 
-else:
+        await context.bot.send_message(uid, "✅ Connected!")
+        await context.bot.send_message(partner, "✅ Connected!")
 
-    cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)",(uid,pref))
+    else:
 
-    await update.message.reply_text("🔎 Searching for a partner...")
+        cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)", (uid, pref))
 
-    async def invite_prompt():
-        await asyncio.sleep(15)
+        await update.message.reply_text("🔎 Searching for a partner...")
 
-        cursor.execute("SELECT 1 FROM waiting_users WHERE user_id=%s",(uid,))
-        still_waiting = cursor.fetchone()
+        async def invite_prompt():
 
-        if still_waiting:
-            link = f"https://t.me/{context.bot.username}?start={uid}"
+            await asyncio.sleep(15)
 
-            await context.bot.send_message(
-                uid,
-                f"🔎 Still searching?\n\nInvite 3 friends to unlock FREE VIP!\n{link}"
+            cursor.execute(
+                "SELECT 1 FROM waiting_users WHERE user_id=%s",
+                (uid,)
             )
 
-    asyncio.create_task(invite_prompt())
-# ================= STOP =================
+            still_waiting = cursor.fetchone()
+
+            if still_waiting:
+
+                link = f"https://t.me/{context.bot.username}?start={uid}"
+
+                await context.bot.send_message(
+                    uid,
+                    f"""🔎 Still searching?
+
+Invite 3 friends and unlock 👑 VIP for 3 days!
+
+Your invite link:
+{link}"""
+                )
+
+        asyncio.create_task(invite_prompt())
+    # ================= STOP =================
 
 async def stop_chat(update,context):
 
