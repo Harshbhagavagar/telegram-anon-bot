@@ -150,12 +150,12 @@ async def match_user(update,context,pref=None):
         """,(pref,uid))
     else:
         cursor.execute("SELECT user_id FROM waiting_users WHERE user_id!=%s LIMIT 1",(uid,))
+        
+row = cursor.fetchone()
 
-    row=cursor.fetchone()
+if row:
 
-    if row:
-
-    partner=row[0]
+    partner = row[0]
 
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(partner,))
 
