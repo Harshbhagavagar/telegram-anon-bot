@@ -147,11 +147,12 @@ async def match_user(update,context,pref=None):
         cursor.execute("""
         SELECT w.user_id
         FROM waiting_users w
-        JOIN users u ON w.user_id=u.user_id
-        WHERE u.gender=%s
-        AND w.user_id!=%s
+        JOIN users u ON w.user_id = u.user_id
+        WHERE u.gender = %s
+        AND (w.preferred_gender = %s OR w.preferred_gender IS NULL)
+        AND w.user_id != %s
         LIMIT 1
-        """,(pref,uid))
+        """,(pref, pref, uid))  
     else:
         cursor.execute("SELECT user_id FROM waiting_users WHERE user_id!=%s LIMIT 1",(uid,))
 
