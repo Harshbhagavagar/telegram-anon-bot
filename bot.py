@@ -2,7 +2,7 @@ import os
 import psycopg2
 import asyncio
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ================= CONFIG =================
@@ -205,21 +205,16 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
     uid=update.message.from_user.id
     text=update.message.text or ""
 
-    # cancel announcement
     if text=="⬅ Back":
         context.user_data.pop("announce_mode",None)
         await update.message.reply_text("User Menu",reply_markup=user_keyboard)
         return
 
-    # ================= ADMIN =================
-
     if uid==ADMIN_ID:
 
         if text=="📢 Announcement":
             context.user_data["announce_mode"]=True
-            await update.message.reply_text(
-            "📢 Send the message/photo/video you want to announce.\n\nPress ⬅ Back to cancel."
-            )
+            await update.message.reply_text("Send announcement message")
             return
 
         if context.user_data.get("announce_mode"):
@@ -239,42 +234,8 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-            await update.message.reply_text(f"✅ Announcement sent to {sent} users")
+            await update.message.reply_text(f"Announcement sent to {sent}")
             return
-
-        if text=="📊 Analytics":
-
-            cursor.execute("SELECT COUNT(*) FROM users")
-            total=cursor.fetchone()[0]
-
-            cursor.execute("SELECT gender,COUNT(*) FROM users GROUP BY gender")
-            genders=dict(cursor.fetchall())
-
-            cursor.execute("SELECT COUNT(*) FROM active_chats")
-            active=cursor.fetchone()[0]//2
-
-            msg=f"Users: {total}\nChats: {active}\n\nMale: {genders.get('Male',0)}\nFemale: {genders.get('Female',0)}"
-
-            await update.message.reply_text(msg)
-            return
-
-        if text=="👥 Active Users":
-
-            cursor.execute("SELECT COUNT(*) FROM active_chats")
-            await update.message.reply_text(f"Active chats: {cursor.fetchone()[0]//2}")
-            return
-
-        if text=="🕒 Waiting Users":
-
-            cursor.execute("SELECT COUNT(*) FROM waiting_users")
-            await update.message.reply_text(f"Waiting users: {cursor.fetchone()[0]}")
-            return
-
-    # ================= USER BUTTONS =================
-
-    if get_partner(uid) and text in ["🚀 Find Partner","👨 Find Male","👩 Find Female"]:
-        await update.message.reply_text("⚠️ You are already in chat. Press ❌ Stop first.")
-        return
 
     if text=="🚀 Find Partner":
         await match_user(update,context)
@@ -301,26 +262,42 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
     elif text=="💎 VIP":
         await update.message.reply_text("VIP Menu",reply_markup=vip_keyboard)
 
-    # ================= MESSAGE FORWARD =================
+    elif text=="🎁 Get FREE VIP":
+
+        cursor.execute("SELECT referral_count FROM users WHERE user_id=%s",(uid,))
+        row=cursor.fetchone()
+        count=row[0] if row else 0
+
+        link=f"https://t.me/{context.bot.username}?start={uid}"
+
+        await update.message.reply_text(
+f"""🎁 Invite friends to get FREE VIP
+
+Your link:
+{link}
+
+Progress: {count}/3
+
+Invite 3 friends to unlock 👑 VIP for 3 days!
+"""
+)
 
     partner=get_partner(uid)
 
-    if text in ["🚀 Find Partner","👨 Find Male","👩 Find Female","⏭ Next","❌ Stop","💎 VIP","🎁 Get FREE VIP","⬅ Back"]:
-        return
-
-    if partner:
+    if partner and text not in ["🚀 Find Partner","👨 Find Male","👩 Find Female","⏭ Next","❌ Stop","💎 VIP","🎁 Get FREE VIP"]:
         try:
             await update.message.copy(chat_id=partner)
         except:
-            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
-            cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
-            await update.message.reply_text("Partner disconnected")
+            pass
 
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     uid=update.message.from_user.id
+    username=update.message.from_user.username
+    name=update.message.from_user.first_name
+
     ref=int(context.args[0]) if context.args and context.args[0].isdigit() else None
 
     if uid==ADMIN_ID:
@@ -331,9 +308,35 @@ async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Welcome back",reply_markup=user_keyboard)
         return
 
-    context.user_data["step"]="name"
-    context.user_data["ref"]=ref
-    await update.message.reply_text("Enter your name")
+    cursor.execute(
+        "INSERT INTO users (user_id,username,name,referred_by) VALUES (%s,%s,%s,%s)",
+        (uid,username,name,ref)
+    )
+
+    if ref and ref!=uid:
+
+        cursor.execute(
+        "UPDATE users SET referral_count=referral_count+1 WHERE user_id=%s",
+        (ref,)
+        )
+
+        cursor.execute(
+        "SELECT referral_count FROM users WHERE user_id=%s",
+        (ref,)
+        )
+
+        count=cursor.fetchone()[0]
+
+        if count>=3:
+
+            expiry=datetime.utcnow()+timedelta(days=3)
+
+            cursor.execute(
+            "UPDATE users SET vip_expiry=%s WHERE user_id=%s",
+            (expiry,ref)
+            )
+
+    await update.message.reply_text("Welcome!",reply_markup=user_keyboard)
 
 # ================= RUN =================
 
