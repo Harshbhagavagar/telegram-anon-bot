@@ -167,8 +167,34 @@ async def match_user(update,context,pref=None):
 
     else:
 
-        cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)",(uid,pref))
-        await update.message.reply_text("🔎 Searching...")
+    cursor.execute("INSERT INTO waiting_users VALUES(%s,%s)",(uid,pref))
+
+    await update.message.reply_text("🔎 Searching for a partner...")
+
+    async def invite_prompt():
+
+        await asyncio.sleep(15)
+
+        cursor.execute("SELECT 1 FROM waiting_users WHERE user_id=%s",(uid,))
+        still_waiting = cursor.fetchone()
+
+        if still_waiting:
+
+            link = f"https://t.me/{context.bot.username}?start={uid}"
+
+            await context.bot.send_message(
+                uid,
+f"""🔎 Still searching?
+
+Get **Priority Matching + Gender Filters FREE** by inviting 3 friends.
+
+Invite link:
+{link}
+
+Invite 3 friends and unlock 👑 VIP for 3 days!"""
+            )
+
+    asyncio.create_task(invite_prompt())
 
 # ================= STOP =================
 
