@@ -202,24 +202,46 @@ Your invite link:
 
 async def stop_chat(update,context):
 
-    uid=update.message.from_user.id
+    uid = update.message.from_user.id
 
-    cursor.execute("DELETE FROM waiting_users WHERE user_id=%s",(uid,))
+    # remove from waiting queue
+    cursor.execute(
+        "DELETE FROM waiting_users WHERE user_id=%s",
+        (uid,)
+    )
 
-    partner=get_partner(uid)
+    partner = get_partner(uid)
 
+    # if user was only searching
     if not partner:
 
-        await update.message.reply_text("Search stopped",reply_markup=user_keyboard)
+        await update.message.reply_text(
+            "⛔ Search stopped",
+            reply_markup=user_keyboard
+        )
         return
 
-    cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
-    cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
+    # remove active chat
+    cursor.execute(
+        "DELETE FROM active_chats WHERE user_id=%s",
+        (uid,)
+    )
 
-    await update.message.reply_text("❌ Chat ended",reply_markup=user_keyboard)
+    cursor.execute(
+        "DELETE FROM active_chats WHERE user_id=%s",
+        (partner,)
+    )
+
+    await update.message.reply_text(
+        "❌ Chat ended",
+        reply_markup=user_keyboard
+    )
 
     try:
-        await context.bot.send_message(partner,"Stranger left the chat")
+        await context.bot.send_message(
+            partner,
+            "Stranger left the chat"
+        )
     except:
         pass
 
@@ -292,12 +314,15 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     if text=="⬅ Back":
 
-        if uid==ADMIN_ID:
-            await update.message.reply_text("Admin panel",reply_markup=admin_keyboard)
-        else:
-            await update.message.reply_text("User Menu",reply_markup=user_keyboard)
+        context.user_data.pop("announce_mode", None)
 
-        return
+    await update.message.reply_text(
+        "User Menu",
+        reply_markup=user_keyboard
+    )
+
+    return
+      
 
     # -------- ADMIN --------
 
