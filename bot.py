@@ -421,8 +421,7 @@ if partner:
         cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
         cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
 
-        await
-        update.message.reply_text("Partner disconnected")
+        await update.message.reply_text("Partner disconnected")
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
