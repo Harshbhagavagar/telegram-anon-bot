@@ -66,11 +66,12 @@ vip_keyboard = ReplyKeyboardMarkup(
 resize_keyboard=True
 )
 
+# 🔴 UPDATED ADMIN KEYBOARD
 admin_keyboard = ReplyKeyboardMarkup(
 [
 ["📊 Analytics"],
 ["👥 Active Users","🕒 Waiting Users"],
-["⬅ Back"]
+["🔙 Admin Menu"]
 ],
 resize_keyboard=True
 )
@@ -192,12 +193,10 @@ async def vip_toggle(update:Update,context:ContextTypes.DEFAULT_TYPE):
     uid=int(data.split("_")[1])
 
     if data.startswith("vip_"):
-
         cursor.execute("UPDATE users SET is_vip=TRUE WHERE user_id=%s",(uid,))
         await query.edit_message_text(f"{uid} is now VIP")
 
     elif data.startswith("unvip_"):
-
         cursor.execute("UPDATE users SET is_vip=FALSE WHERE user_id=%s",(uid,))
         await query.edit_message_text(f"{uid} VIP removed")
 
@@ -286,14 +285,16 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
     uid=update.message.from_user.id
     text=update.message.text or ""
 
-# back
+# 🔴 USER BACK
 
     if text=="⬅ Back":
+        await update.message.reply_text("Menu",reply_markup=user_keyboard)
+        return
 
-        kb=admin_keyboard if uid==ADMIN_ID else user_keyboard
+# 🔴 ADMIN BACK
 
-        await update.message.reply_text("Menu",reply_markup=kb)
-
+    if text=="🔙 Admin Menu":
+        await update.message.reply_text("Admin panel",reply_markup=admin_keyboard)
         return
 
 # admin panel
