@@ -162,7 +162,6 @@ async def match_user(update, context, pref=None):
     uid = update.message.from_user.id
     if get_partner(uid): return
     
-    # Remove from waiting if they try to search again
     cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (uid,))
     
     sql = "SELECT w.user_id FROM waiting_users w JOIN users u ON w.user_id=u.user_id WHERE u.gender=%s AND w.user_id!=%s ORDER BY w.entry_time ASC LIMIT 1" if pref else "SELECT user_id FROM waiting_users WHERE user_id!=%s ORDER BY entry_time ASC LIMIT 1"
@@ -182,11 +181,13 @@ async def match_user(update, context, pref=None):
             ON CONFLICT (user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender
         """, (uid, pref))
         await update.message.reply_text("🔎 Searching for a partner...")
-        context.job_queue.run_once(match_timeout, 180, chat_id=uid, user_id=uid)
+        
+        # Safely run timeout only if job_queue exists
+        if context.job_queue:
+            context.job_queue.run_once(match_timeout, 180, chat_id=uid, user_id=uid)
 
 async def match_timeout(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.user_id
-    # Safer check: only delete if they are still waiting
     cursor.execute("SELECT 1 FROM waiting_users WHERE user_id=%s", (uid,))
     if cursor.fetchone():
         cursor.execute("DELETE FROM waiting_users WHERE user_id=%s", (uid,))
@@ -208,6 +209,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     uid, text = update.message.from_user.id, update.message.text
 
+    # Fixed "Back" Logic to avoid spam
     if text in ["⬅ Back", "Back"]:
         context.user_data.clear()
         kb = admin_keyboard if uid == ADMIN_ID else user_keyboard
@@ -242,7 +244,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == "gender":
             gen = text.capitalize()
             if gen not in ["Male", "Female"]:
-                await update.message.reply_text("⚠️ Please use buttons.", reply_markup=gender_keyboard)
+                await update.message.reply_text("⚠️ Use buttons.", reply_markup=gender_keyboard)
                 return
             context.user_data.update({"gender": gen, "step": "country"})
             await update.message.reply_text("Enter country:", reply_markup=ReplyKeyboardRemove())
@@ -297,15 +299,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Initialize JobQueue correctly
-app.job_queue.start()
+# FIXED: Check if job_queue exists before starting to avoid crash
+if app.job_queue:
+    app.job_queue.start()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("find", find_user))
 app.add_handler(CallbackQueryHandler(vip_toggle))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
-
-
 
 app.run_polling(drop_pending_updates=True)
