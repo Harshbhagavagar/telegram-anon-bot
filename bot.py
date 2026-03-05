@@ -1,7 +1,7 @@
 import os
 import psycopg2
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -102,7 +102,7 @@ def is_vip(uid):
     if not row:
         return False
     vip,expiry=row
-    return vip or (expiry and expiry>datetime.utcnow())
+    return vip or (expiry and expiry > datetime.now(UTC))
 
 # ================= BROADCAST =================
 
