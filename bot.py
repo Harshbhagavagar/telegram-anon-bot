@@ -176,7 +176,7 @@ async def match_user(update, context, pref=None):
 
         async def invite_prompt():
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(45)
 
             cursor.execute(
                 "SELECT 1 FROM waiting_users WHERE user_id=%s",
