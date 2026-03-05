@@ -310,19 +310,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Registration complete 🎉",reply_markup=user_keyboard)
         return
 
-    # -------- BACK BUTTON --------
 
-    if text=="⬅ Back":
-
-        context.user_data.pop("announce_mode", None)
-
-    await update.message.reply_text(
-        "User Menu",
-        reply_markup=user_keyboard
-    )
-
-    return
-      
 
     # -------- ADMIN --------
 
@@ -454,7 +442,21 @@ Invite 3 friends to unlock 👑 VIP for 3 days!
             cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(uid,))
             cursor.execute("DELETE FROM active_chats WHERE user_id=%s",(partner,))
             await update.message.reply_text("Partner disconnected")
+            
+    # -------- BACK BUTTON --------
+    if text == "⬅ Back":
 
+    # cancel announcement mode
+        context.user_data.pop("announce_mode", None)
+
+    # go back to user menu
+        await update.message.reply_text(
+            "User Menu",
+            reply_markup=user_keyboard
+    )
+
+    return
+    
 # ================= START =================
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
