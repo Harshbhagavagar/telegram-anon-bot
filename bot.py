@@ -391,10 +391,7 @@ async def router(update:Update,context:ContextTypes.DEFAULT_TYPE):
         f"3 invites = 3 days VIP"
 
         )
-
 # message forwarding
-
-    # message forwarding
 
 partner = get_partner(uid)
 
