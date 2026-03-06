@@ -676,13 +676,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📢 Announcement sent to {sent} users.")
             return
 
-       if text == "⬅ Back":
-            context.user_data.pop("announce_mode", None)
-            await update.message.reply_text("Main menu", reply_markup=user_keyboard)
-            ADMIN_ID_TEMP = uid  # treat as normal user from now
-            context.user_data["force_user_menu"] = True
-            return
-
+      if text == "⬅ Back":
+        context.user_data.pop("announce_mode", None)
+        await update.message.reply_text("Main menu", reply_markup=user_keyboard)
+        return
     # -------- USER BUTTONS --------
 
     if text == "🚀 Find Partner":
