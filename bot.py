@@ -104,6 +104,15 @@ user_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# Shown when user is actively chatting — report button appears here
+chat_keyboard = ReplyKeyboardMarkup(
+    [
+        ["⏭ Next", "❌ Stop"],
+        ["⚠️ Report"],
+    ],
+    resize_keyboard=True,
+)
+
 admin_main_keyboard = ReplyKeyboardMarkup(
     [
         ["🚀 Find Partner"],
@@ -531,7 +540,18 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", uid)
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", partner)
 
+    # Store last partner so Report button can reference it after chat ends
+    context.user_data["last_partner"] = partner
+
     await update.message.reply_text("❌ Chat ended.", reply_markup=get_main_keyboard(uid))
+    await update.message.reply_text(
+        "Did something go wrong? You can report this user.",
+        reply_markup=ReplyKeyboardMarkup(
+            [["⚠️ Report"]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
 
     try:
         await context.bot.send_message(partner, "👋 Stranger left the chat.")
@@ -544,18 +564,26 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Called when user presses ⚠️ Report button during an active chat.
-    Records the report and notifies admin.
+    Can be called:
+    - During an active chat (reports current partner)
+    - Right after chat ends via ⚠️ Report Last Partner button (reports last_partner)
     """
     uid     = update.message.from_user.id
     partner = await get_partner(uid)
 
+    # If not in active chat, check if they just ended one
+    if not partner:
+        partner = context.user_data.get("last_partner")
+
     if not partner:
         await update.message.reply_text(
-            "⚠️ You can only report someone while in an active chat.",
+            "⚠️ No recent chat to report.",
             reply_markup=get_main_keyboard(uid),
         )
         return
+    
+    # Clear last_partner so it can't be reported again
+    context.user_data.pop("last_partner", None)
 
     # Check if already reported this partner in this session
     existing = await db_pool.fetchrow(
@@ -616,7 +644,7 @@ BUTTON_TEXTS = {
     "🚀 Find Partner", "👨 Find Male", "👩 Find Female",
     "⏭ Next", "❌ Stop", "💎 VIP", "🎁 Get FREE VIP",
     "👑 Contact Admin", "⬅ Back", "⚙️ Admin Panel",
-    "⚠️ Report",
+    "⚠️ Report", "⚠️ Report Last Partner",
     "📊 Analytics", "👥 Active Users", "🕒 Waiting Users",
     "📢 Announcement", "👑 VIP Toggle", "🧹 Clean Dead Chats",
 }
@@ -803,7 +831,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         return
 
-    if text == "⚠️ Report":
+    if text == "⚠️ Report" or text == "⚠️ Report Last Partner":
         await handle_report(update, context)
         return
 
