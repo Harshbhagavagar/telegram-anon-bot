@@ -155,6 +155,7 @@ admin_keyboard = ReplyKeyboardMarkup(
         ["📢 Announcement"],
         ["👥 Active Users", "🕒 Waiting Users"],
         ["👑 VIP Toggle"],
+        ["🧹 Clean Dead Chats"],
         ["⬅ Back"],
     ],
     resize_keyboard=True,
@@ -251,6 +252,74 @@ def handle_referral(new_uid: int, referrer_uid: int) -> bool:
             grant_vip(referrer_uid, VIP_REFERRAL_DAYS)
             return True
     return False
+
+async def clean_dead_chats(context: ContextTypes.DEFAULT_TYPE = None, bot=None):
+    """
+    Checks every active chat by sending a dummy getChatMember request.
+    If both users in a pair are unreachable, the chat row is deleted.
+    Safe to call manually via /cleanchats or automatically on startup.
+    """
+    b = bot or (context.bot if context else None)
+    if not b:
+        return 0
+
+    with get_db() as (_, cur):
+        cur.execute("SELECT DISTINCT user_id, partner_id FROM active_chats")
+        pairs = cur.fetchall()
+
+    seen   = set()
+    cleaned = 0
+
+    for uid, partner in pairs:
+        pair_key = tuple(sorted((uid, partner)))
+        if pair_key in seen:
+            continue
+        seen.add(pair_key)
+
+        uid_alive     = False
+        partner_alive = False
+
+        try:
+            await b.send_chat_action(chat_id=uid, action="typing")
+            uid_alive = True
+        except Exception:
+            pass
+
+        try:
+            await b.send_chat_action(chat_id=partner, action="typing")
+            partner_alive = True
+        except Exception:
+            pass
+
+        if not uid_alive or not partner_alive:
+            with get_db() as (_, cur):
+                cur.execute("DELETE FROM active_chats WHERE user_id = %s", (uid,))
+                cur.execute("DELETE FROM active_chats WHERE user_id = %s", (partner,))
+            cleaned += 1
+            logger.info("Cleaned dead chat between %s and %s", uid, partner)
+
+            # Notify the still-alive side
+            if uid_alive:
+                try:
+                    await b.send_message(uid, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                except Exception:
+                    pass
+            if partner_alive:
+                try:
+                    await b.send_message(partner, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                except Exception:
+                    pass
+
+    return cleaned
+
+
+async def cleanchats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("🔍 Scanning for dead chats...")
+    cleaned = await clean_dead_chats(bot=context.bot)
+    await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
+
 
 # ================= BROADCAST =================
 
@@ -472,7 +541,7 @@ BUTTON_TEXTS = {
     "⏭ Next", "❌ Stop", "💎 VIP", "🎁 Get FREE VIP",
     "👑 Contact Admin", "⬅ Back",
     "📊 Analytics", "👥 Active Users", "🕒 Waiting Users",
-    "📢 Announcement", "👑 VIP Toggle",
+    "📢 Announcement", "👑 VIP Toggle", "🧹 Clean Dead Chats",
 }
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -552,7 +621,11 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 active = cur.fetchone()[0] // 2
                 cur.execute("SELECT COUNT(*) FROM waiting_users")
                 waiting = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM users WHERE vip_expiry > NOW()")
+                cur.execute("""
+                    SELECT COUNT(*) FROM users
+                    WHERE (is_vip = TRUE AND vip_expiry IS NULL)
+                       OR vip_expiry > NOW()
+                """)
                 vip_count = cur.fetchone()[0]
             await update.message.reply_text(
                 f"📊 Analytics\n\n"
@@ -575,6 +648,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("SELECT COUNT(*) FROM waiting_users")
                 waiting = cur.fetchone()[0]
             await update.message.reply_text(f"🔎 Waiting users: {waiting}")
+            return
+
+        if text == "🧹 Clean Dead Chats":
+            await update.message.reply_text("🔍 Scanning for dead chats...")
+            cleaned = await clean_dead_chats(bot=context.bot)
+            await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
             return
 
         if text == "👑 VIP Toggle":
@@ -680,7 +759,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "👑 Contact Admin":
-        await update.message.reply_text("Contact admin: @Random1204")
+        await update.message.reply_text("👑 Contact Admin: @Random1204")
         return
 
     if text == "⬅ Back":
@@ -727,6 +806,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref = None
 
     if uid == ADMIN_ID:
+        # Ensure admin has a users row so match/vip/chat functions work
+        with get_db() as (_, cur):
+            cur.execute(
+                """
+                INSERT INTO users (user_id, username, name, gender, is_vip)
+                VALUES (%s, %s, 'Admin', 'Male', TRUE)
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                (uid, username),
+            )
         await update.message.reply_text("Welcome, Admin 👋", reply_markup=admin_keyboard)
         return
 
@@ -755,9 +844,10 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",     start))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("vip",       handle_vip_toggle))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("broadcast",  broadcast))
+    app.add_handler(CommandHandler("vip",        handle_vip_toggle))
+    app.add_handler(CommandHandler("cleanchats", cleanchats_command))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
 
     logger.info("Bot started")
