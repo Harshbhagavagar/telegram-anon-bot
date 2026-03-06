@@ -748,7 +748,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "👑 Contact Admin":
-        await update.message.reply_text("Contact admin: @your_admin_username")
+        await update.message.reply_text("Contact admin: @Random1204")
         return
 
     if text == "⬅ Back":
