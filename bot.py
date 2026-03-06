@@ -57,8 +57,6 @@ def init_db():
     raw_conn.autocommit = False
     try:
         with raw_conn.cursor() as cur:
-
-            # 1. Users table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id        BIGINT PRIMARY KEY,
@@ -75,39 +73,29 @@ def init_db():
                     created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
             """)
-
-            # 2. Waiting users table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS waiting_users (
                     user_id          BIGINT PRIMARY KEY,
                     preferred_gender TEXT
                 )
             """)
-
-            # 3. Active chats table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS active_chats (
                     user_id    BIGINT PRIMARY KEY,
                     partner_id BIGINT
                 )
             """)
-
-        # Commit tables first
         raw_conn.commit()
 
         with raw_conn.cursor() as cur:
-            # 4. Migrate: add queued_at if this is an existing DB
             cur.execute("""
                 ALTER TABLE waiting_users
                 ADD COLUMN IF NOT EXISTS queued_at
                 TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             """)
-
-        # Commit column before creating index that depends on it
         raw_conn.commit()
 
         with raw_conn.cursor() as cur:
-            # 5. Indexes
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_waiting_queue
                 ON waiting_users (queued_at)
@@ -116,7 +104,6 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_vip_expiry
                 ON users (vip_expiry)
             """)
-
         raw_conn.commit()
 
     except Exception:
@@ -130,12 +117,38 @@ def init_db():
 
 # ================= KEYBOARDS =================
 
+# Standard user keyboard
 user_keyboard = ReplyKeyboardMarkup(
     [
         ["🚀 Find Partner"],
         ["👨 Find Male", "👩 Find Female"],
         ["⏭ Next", "❌ Stop"],
         ["💎 VIP"],
+    ],
+    resize_keyboard=True,
+)
+
+# Admin sees same user buttons PLUS an Admin Panel button
+admin_main_keyboard = ReplyKeyboardMarkup(
+    [
+        ["🚀 Find Partner"],
+        ["👨 Find Male", "👩 Find Female"],
+        ["⏭ Next", "❌ Stop"],
+        ["💎 VIP"],
+        ["⚙️ Admin Panel"],
+    ],
+    resize_keyboard=True,
+)
+
+# Admin sub-panel (opened via ⚙️ Admin Panel)
+admin_panel_keyboard = ReplyKeyboardMarkup(
+    [
+        ["📊 Analytics"],
+        ["📢 Announcement"],
+        ["👥 Active Users", "🕒 Waiting Users"],
+        ["👑 VIP Toggle"],
+        ["🧹 Clean Dead Chats"],
+        ["⬅ Back"],
     ],
     resize_keyboard=True,
 )
@@ -149,18 +162,6 @@ vip_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-admin_keyboard = ReplyKeyboardMarkup(
-    [
-        ["📊 Analytics"],
-        ["📢 Announcement"],
-        ["👥 Active Users", "🕒 Waiting Users"],
-        ["👑 VIP Toggle"],
-        ["🧹 Clean Dead Chats"],
-        ["⬅ Back"],
-    ],
-    resize_keyboard=True,
-)
-
 gender_keyboard = ReplyKeyboardMarkup(
     [["Male", "Female"]],
     resize_keyboard=True,
@@ -168,6 +169,11 @@ gender_keyboard = ReplyKeyboardMarkup(
 )
 
 # ================= HELPERS =================
+
+def get_main_keyboard(uid: int) -> ReplyKeyboardMarkup:
+    """Returns admin_main_keyboard for admin, user_keyboard for everyone else."""
+    return admin_main_keyboard if uid == ADMIN_ID else user_keyboard
+
 
 def user_exists(uid: int) -> bool:
     with get_db() as (_, cur):
@@ -198,10 +204,8 @@ def check_vip(uid: int) -> bool:
         if not row:
             return False
         is_vip, expiry = row
-        # Permanent VIP — manually granted with no expiry
         if is_vip and expiry is None:
             return True
-        # Timed VIP — check expiry
         if expiry and expiry > datetime.now(timezone.utc):
             return True
         return False
@@ -253,21 +257,18 @@ def handle_referral(new_uid: int, referrer_uid: int) -> bool:
             return True
     return False
 
-async def clean_dead_chats(context: ContextTypes.DEFAULT_TYPE = None, bot=None):
-    """
-    Checks every active chat by sending a dummy getChatMember request.
-    If both users in a pair are unreachable, the chat row is deleted.
-    Safe to call manually via /cleanchats or automatically on startup.
-    """
-    b = bot or (context.bot if context else None)
-    if not b:
-        return 0
+# ================= CLEAN DEAD CHATS =================
 
+async def clean_dead_chats(bot):
+    """
+    Pings every user in active_chats. Removes pairs where either side
+    is unreachable. Notifies the surviving user.
+    """
     with get_db() as (_, cur):
         cur.execute("SELECT DISTINCT user_id, partner_id FROM active_chats")
         pairs = cur.fetchall()
 
-    seen   = set()
+    seen    = set()
     cleaned = 0
 
     for uid, partner in pairs:
@@ -280,13 +281,13 @@ async def clean_dead_chats(context: ContextTypes.DEFAULT_TYPE = None, bot=None):
         partner_alive = False
 
         try:
-            await b.send_chat_action(chat_id=uid, action="typing")
+            await bot.send_chat_action(chat_id=uid, action="typing")
             uid_alive = True
         except Exception:
             pass
 
         try:
-            await b.send_chat_action(chat_id=partner, action="typing")
+            await bot.send_chat_action(chat_id=partner, action="typing")
             partner_alive = True
         except Exception:
             pass
@@ -298,15 +299,20 @@ async def clean_dead_chats(context: ContextTypes.DEFAULT_TYPE = None, bot=None):
             cleaned += 1
             logger.info("Cleaned dead chat between %s and %s", uid, partner)
 
-            # Notify the still-alive side
             if uid_alive:
                 try:
-                    await b.send_message(uid, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                    await bot.send_message(
+                        uid,
+                        "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again."
+                    )
                 except Exception:
                     pass
             if partner_alive:
                 try:
-                    await b.send_message(partner, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                    await bot.send_message(
+                        partner,
+                        "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again."
+                    )
                 except Exception:
                     pass
 
@@ -317,9 +323,8 @@ async def cleanchats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.message.from_user.id != ADMIN_ID:
         return
     await update.message.reply_text("🔍 Scanning for dead chats...")
-    cleaned = await clean_dead_chats(bot=context.bot)
+    cleaned = await clean_dead_chats(context.bot)
     await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
-
 
 # ================= BROADCAST =================
 
@@ -482,7 +487,13 @@ async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, pref: s
                 """,
                 (uid, pref),
             )
-        await update.message.reply_text("🔎 Searching for a partner...")
+
+        if pref == "Male":
+            await update.message.reply_text("🔎 Searching for a Male partner...")
+        elif pref == "Female":
+            await update.message.reply_text("🔎 Searching for a Female partner...")
+        else:
+            await update.message.reply_text("🔎 Searching for a partner...")
 
         if not context.user_data.get("invite_timer"):
             context.user_data["invite_timer"] = True
@@ -517,14 +528,14 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     partner = get_partner(uid)
 
     if not partner:
-        await update.message.reply_text("⛔ Search stopped.", reply_markup=user_keyboard)
+        await update.message.reply_text("⛔ Search stopped.", reply_markup=get_main_keyboard(uid))
         return False
 
     with get_db() as (_, cur):
         cur.execute("DELETE FROM active_chats WHERE user_id = %s", (uid,))
         cur.execute("DELETE FROM active_chats WHERE user_id = %s", (partner,))
 
-    await update.message.reply_text("❌ Chat ended.", reply_markup=user_keyboard)
+    await update.message.reply_text("❌ Chat ended.", reply_markup=get_main_keyboard(uid))
 
     try:
         await context.bot.send_message(partner, "👋 Stranger left the chat.")
@@ -535,11 +546,10 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 # ================= ROUTER =================
 
-# All buttons that should NOT be relayed to chat partner
 BUTTON_TEXTS = {
     "🚀 Find Partner", "👨 Find Male", "👩 Find Female",
     "⏭ Next", "❌ Stop", "💎 VIP", "🎁 Get FREE VIP",
-    "👑 Contact Admin", "⬅ Back",
+    "👑 Contact Admin", "⬅ Back", "⚙️ Admin Panel",
     "📊 Analytics", "👥 Active Users", "🕒 Waiting Users",
     "📢 Announcement", "👑 VIP Toggle", "🧹 Clean Dead Chats",
 }
@@ -603,15 +613,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
-        await update.message.reply_text("Registration complete 🎉", reply_markup=user_keyboard)
+        await update.message.reply_text("Registration complete 🎉", reply_markup=get_main_keyboard(uid))
         return
 
-    # -------- ADMIN-ONLY BUTTONS --------
-    # Only buttons that ONLY exist in the admin panel go here.
-    # Shared buttons (Find Partner, VIP, etc.) are handled further below
-    # so both admin and regular users can use them.
+    # -------- ADMIN PANEL BUTTON --------
 
-    if uid == ADMIN_ID:
+    if text == "⚙️ Admin Panel" and uid == ADMIN_ID:
+        context.user_data["in_admin_panel"] = True
+        await update.message.reply_text("⚙️ Admin Panel", reply_markup=admin_panel_keyboard)
+        return
+
+    # -------- ADMIN PANEL ACTIONS --------
+
+    if uid == ADMIN_ID and context.user_data.get("in_admin_panel"):
 
         if text == "📊 Analytics":
             with get_db() as (_, cur):
@@ -650,12 +664,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔎 Waiting users: {waiting}")
             return
 
-        if text == "🧹 Clean Dead Chats":
-            await update.message.reply_text("🔍 Scanning for dead chats...")
-            cleaned = await clean_dead_chats(bot=context.bot)
-            await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
-            return
-
         if text == "👑 VIP Toggle":
             await update.message.reply_text(
                 "Use the /vip command to manage VIP:\n\n"
@@ -663,6 +671,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/vip <user_id> <days>  → grant N days\n"
                 "/vip <user_id> 0       → revoke VIP"
             )
+            return
+
+        if text == "🧹 Clean Dead Chats":
+            await update.message.reply_text("🔍 Scanning for dead chats...")
+            cleaned = await clean_dead_chats(context.bot)
+            await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
             return
 
         if text == "📢 Announcement":
@@ -673,7 +687,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("announce_mode"):
             if text == "⬅ Back":
                 context.user_data["announce_mode"] = False
-                await update.message.reply_text("Announcement cancelled.", reply_markup=admin_keyboard)
+                await update.message.reply_text("Announcement cancelled.", reply_markup=admin_panel_keyboard)
                 return
             context.user_data["announce_mode"] = False
             with get_db() as (_, cur):
@@ -691,10 +705,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if text == "⬅ Back":
-            await update.message.reply_text("Main menu", reply_markup=user_keyboard)
+            context.user_data["in_admin_panel"] = False
+            context.user_data.pop("announce_mode", None)
+            await update.message.reply_text("Main menu", reply_markup=admin_main_keyboard)
             return
 
-    # -------- BUTTONS SHARED BY ADMIN AND USERS --------
+    # Set in_admin_panel flag when entering admin panel
+    if text == "⚙️ Admin Panel" and uid == ADMIN_ID:
+        context.user_data["in_admin_panel"] = True
+        await update.message.reply_text("⚙️ Admin Panel", reply_markup=admin_panel_keyboard)
+        return
+
+    # -------- SHARED BUTTONS (admin + users) --------
 
     if text == "🚀 Find Partner":
         await match_user(update, context)
@@ -764,7 +786,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "⬅ Back":
         context.user_data.pop("announce_mode", None)
-        await update.message.reply_text("Main menu", reply_markup=user_keyboard)
+        await update.message.reply_text("Main menu", reply_markup=get_main_keyboard(uid))
         return
 
     # -------- RELAY MESSAGE TO PARTNER --------
@@ -785,12 +807,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute("DELETE FROM active_chats WHERE user_id = %s", (uid,))
                     cur.execute("DELETE FROM active_chats WHERE user_id = %s", (partner,))
                 await update.message.reply_text(
-                    "⚠️ Partner disconnected.", reply_markup=user_keyboard
+                    "⚠️ Partner disconnected.", reply_markup=get_main_keyboard(uid)
                 )
         else:
             await update.message.reply_text(
                 "You are not in a chat. Press 🚀 Find Partner to start.",
-                reply_markup=user_keyboard,
+                reply_markup=get_main_keyboard(uid),
             )
 
 # ================= START =================
@@ -806,7 +828,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref = None
 
     if uid == ADMIN_ID:
-        # Ensure admin has a users row so match/vip/chat functions work
         with get_db() as (_, cur):
             cur.execute(
                 """
@@ -816,7 +837,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """,
                 (uid, username),
             )
-        await update.message.reply_text("Welcome, Admin 👋", reply_markup=admin_keyboard)
+        await update.message.reply_text("Welcome, Admin 👋", reply_markup=admin_main_keyboard)
         return
 
     if user_exists(uid):
