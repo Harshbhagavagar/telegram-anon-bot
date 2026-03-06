@@ -53,48 +53,80 @@ def get_db():
 # ================= SCHEMA =================
 
 def init_db():
-    with get_db() as (_, cur):
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id        BIGINT PRIMARY KEY,
-                username       TEXT,
-                name           TEXT,
-                gender         TEXT,
-                country        TEXT,
-                age            INT,
-                is_vip         BOOLEAN DEFAULT FALSE,
-                vip_expiry     TIMESTAMP WITH TIME ZONE,
-                referral_count INT DEFAULT 0,
-                referred_by    BIGINT,
-                total_messages INT DEFAULT 0,
-                created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS waiting_users (
-                user_id          BIGINT PRIMARY KEY,
-                preferred_gender TEXT,
-                queued_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS active_chats (
-                user_id    BIGINT PRIMARY KEY,
-                partner_id BIGINT
-            )
-        """)
+    raw_conn = db_pool.getconn()
+    raw_conn.autocommit = False
+    try:
+        with raw_conn.cursor() as cur:
 
-        # Indexes for matchmaking and analytics performance
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_waiting_queue
-            ON waiting_users (queued_at)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_vip_expiry
-            ON users (vip_expiry)
-        """)
+            # 1. Users table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id        BIGINT PRIMARY KEY,
+                    username       TEXT,
+                    name           TEXT,
+                    gender         TEXT,
+                    country        TEXT,
+                    age            INT,
+                    is_vip         BOOLEAN DEFAULT FALSE,
+                    vip_expiry     TIMESTAMP WITH TIME ZONE,
+                    referral_count INT DEFAULT 0,
+                    referred_by    BIGINT,
+                    total_messages INT DEFAULT 0,
+                    created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """)
 
-    logger.info("Database initialised")
+            # 2. Waiting users table (without queued_at so ALTER below is safe)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS waiting_users (
+                    user_id          BIGINT PRIMARY KEY,
+                    preferred_gender TEXT
+                )
+            """)
+
+            # 3. Active chats table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS active_chats (
+                    user_id    BIGINT PRIMARY KEY,
+                    partner_id BIGINT
+                )
+            """)
+
+        # ── Commit tables first so the column migration sees them ──
+        raw_conn.commit()
+
+        with raw_conn.cursor() as cur:
+            # 4. Migrate: add queued_at if this is an existing DB
+            cur.execute("""
+                ALTER TABLE waiting_users
+                ADD COLUMN IF NOT EXISTS queued_at
+                TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            """)
+
+        # ── Commit column before creating the index that depends on it ──
+        raw_conn.commit()
+
+        with raw_conn.cursor() as cur:
+            # 5. Indexes (column is guaranteed to exist now)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_waiting_queue
+                ON waiting_users (queued_at)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_vip_expiry
+                ON users (vip_expiry)
+            """)
+
+        raw_conn.commit()
+
+    except Exception:
+        raw_conn.rollback()
+        logger.exception("Database init failed")
+        raise
+    finally:
+        db_pool.putconn(raw_conn)
+
+    logger.info("Database initialised and migrated successfully")
 
 # ================= KEYBOARDS =================
 
