@@ -678,7 +678,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if text == "⬅ Back":
             context.user_data.pop("announce_mode", None)
-            await update.message.reply_text("Admin panel", reply_markup=admin_keyboard)
+            await update.message.reply_text("Main menu", reply_markup=admin_keyboard)
             return
 
     # -------- USER BUTTONS --------
