@@ -76,7 +76,7 @@ def init_db():
                 )
             """)
 
-            # 2. Waiting users table (without queued_at so ALTER below is safe)
+            # 2. Waiting users table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS waiting_users (
                     user_id          BIGINT PRIMARY KEY,
@@ -92,7 +92,7 @@ def init_db():
                 )
             """)
 
-        # ── Commit tables first so the column migration sees them ──
+        # Commit tables first
         raw_conn.commit()
 
         with raw_conn.cursor() as cur:
@@ -103,11 +103,11 @@ def init_db():
                 TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             """)
 
-        # ── Commit column before creating the index that depends on it ──
+        # Commit column before creating index that depends on it
         raw_conn.commit()
 
         with raw_conn.cursor() as cur:
-            # 5. Indexes (column is guaranteed to exist now)
+            # 5. Indexes
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_waiting_queue
                 ON waiting_users (queued_at)
@@ -175,7 +175,6 @@ def user_exists(uid: int) -> bool:
 
 
 def is_registered(uid: int) -> bool:
-    """Fully registered = completed name/gender/country/age flow."""
     with get_db() as (_, cur):
         cur.execute(
             "SELECT 1 FROM users WHERE user_id = %s AND name IS NOT NULL AND gender IS NOT NULL",
@@ -198,17 +197,16 @@ def check_vip(uid: int) -> bool:
         if not row:
             return False
         is_vip, expiry = row
-        # Active if is_vip is True with no expiry (permanent)
+        # Permanent VIP — manually granted with no expiry
         if is_vip and expiry is None:
             return True
-        # Active if expiry is set and still in the future
+        # Timed VIP — check expiry
         if expiry and expiry > datetime.now(timezone.utc):
             return True
         return False
 
 
 def grant_vip(uid: int, days: int):
-    """Extend (or create) VIP for uid by `days` days. Returns new expiry."""
     with get_db() as (_, cur):
         cur.execute(
             """
@@ -226,7 +224,6 @@ def grant_vip(uid: int, days: int):
 
 
 def revoke_vip(uid: int):
-    """Remove VIP from uid immediately."""
     with get_db() as (_, cur):
         cur.execute(
             "UPDATE users SET is_vip = FALSE, vip_expiry = NULL WHERE user_id = %s",
@@ -235,16 +232,10 @@ def revoke_vip(uid: int):
 
 
 def handle_referral(new_uid: int, referrer_uid: int) -> bool:
-    """
-    Increment referrer's count only after new user fully registers.
-    Blocks fake-account exploits — unregistered referees are ignored.
-    Returns True if referrer just earned a VIP reward.
-    """
     if referrer_uid == new_uid:
         return False
     if not is_registered(new_uid):
         return False
-
     with get_db() as (_, cur):
         cur.execute(
             """
@@ -269,12 +260,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
-
     msg = " ".join(context.args)
     with get_db() as (_, cur):
         cur.execute("SELECT user_id FROM users")
         users = cur.fetchall()
-
     sent = 0
     for (user_id,) in users:
         try:
@@ -285,17 +274,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Sent to {sent} users")
 
-# ================= VIP TOGGLE (ADMIN COMMAND) =================
+# ================= VIP TOGGLE =================
 
 async def handle_vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /vip <user_id>         → grant 30 days VIP
-    /vip <user_id> <days>  → grant N days VIP
-    /vip <user_id> 0       → revoke VIP immediately
-    """
     if update.message.from_user.id != ADMIN_ID:
         return
-
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text(
@@ -305,21 +288,16 @@ async def handle_vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/vip <user_id> 0       → revoke VIP"
         )
         return
-
     target_uid = int(args[0])
     days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 30
-
     if not user_exists(target_uid):
         await update.message.reply_text(f"❌ User {target_uid} not found.")
         return
-
     if days == 0:
         revoke_vip(target_uid)
         await update.message.reply_text(f"✅ VIP revoked for user {target_uid}.")
         try:
-            await context.bot.send_message(
-                target_uid, "ℹ️ Your VIP has been removed by an admin."
-            )
+            await context.bot.send_message(target_uid, "ℹ️ Your VIP has been removed by an admin.")
         except Exception:
             pass
     else:
@@ -340,34 +318,7 @@ async def handle_vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= MATCH =================
 
-async def match_user(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, pref: str = None
-):
-    """
-    Match uid with a waiting partner.
-
-    Preference logic:
-      - pref set   → find someone whose gender == pref AND whose own
-                     preferred_gender is NULL or matches the caller's gender.
-      - pref None  → find anyone whose preferred_gender is NULL (no filter)
-                     OR whose preferred_gender matches the caller's gender.
-                     This ensures e.g. a Female searching for Males can still
-                     be found by a Male searching for Anyone.
-
-    Race-condition fix:
-      pg_try_advisory_xact_lock on the candidate's user_id inside a real
-      transaction (autocommit=False). Two simultaneous callers racing for the
-      same candidate each try to acquire the lock — the second one fails and
-      moves on to the next candidate.
-
-    Fairness fix:
-      Fetch the 5 oldest eligible candidates then shuffle before iterating so
-      queue position still matters but there is no hard deterministic pattern.
-
-    Duplicate timer fix:
-      A context.user_data["invite_timer"] flag prevents multiple background
-      timers stacking up if the user presses Find Partner repeatedly.
-    """
+async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, pref: str = None):
     uid = update.message.from_user.id
 
     if get_partner(uid):
@@ -389,7 +340,6 @@ async def match_user(
     try:
         with raw_conn.cursor() as cur:
             if pref:
-                # Caller wants a specific gender
                 cur.execute(
                     """
                     SELECT w.user_id
@@ -404,8 +354,6 @@ async def match_user(
                     (pref, my_gender, uid),
                 )
             else:
-                # Caller wants anyone — also surface people whose preference
-                # matches the caller's gender so they aren't stranded
                 cur.execute(
                     """
                     SELECT w.user_id
@@ -428,29 +376,17 @@ async def match_user(
             for candidate in candidates:
                 cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (candidate,))
                 if not cur.fetchone()[0]:
-                    continue  # another worker locked this candidate
-
-                cur.execute(
-                    "SELECT 1 FROM waiting_users WHERE user_id = %s", (candidate,)
-                )
+                    continue
+                cur.execute("SELECT 1 FROM waiting_users WHERE user_id = %s", (candidate,))
                 if not cur.fetchone():
-                    continue  # already matched by someone else
-
+                    continue
+                cur.execute("DELETE FROM waiting_users WHERE user_id = %s", (candidate,))
                 cur.execute(
-                    "DELETE FROM waiting_users WHERE user_id = %s", (candidate,)
-                )
-                cur.execute(
-                    """
-                    INSERT INTO active_chats VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id
-                    """,
+                    "INSERT INTO active_chats VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id",
                     (uid, candidate),
                 )
                 cur.execute(
-                    """
-                    INSERT INTO active_chats VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id
-                    """,
+                    "INSERT INTO active_chats VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET partner_id = EXCLUDED.partner_id",
                     (candidate, uid),
                 )
                 partner = candidate
@@ -464,7 +400,6 @@ async def match_user(
         db_pool.putconn(raw_conn)
 
     if partner:
-        # Clear invite timer flag for both sides on successful match
         context.user_data["invite_timer"] = False
         await context.bot.send_message(uid,     "✅ Connected! Say hi 👋")
         await context.bot.send_message(partner, "✅ Connected! Say hi 👋")
@@ -480,16 +415,13 @@ async def match_user(
             )
         await update.message.reply_text("🔎 Searching for a partner...")
 
-        # Only start one invite prompt timer — prevent stacking on repeated presses
         if not context.user_data.get("invite_timer"):
             context.user_data["invite_timer"] = True
 
             async def invite_prompt():
                 await asyncio.sleep(MATCH_INVITE_DELAY)
                 with get_db() as (_, cur):
-                    cur.execute(
-                        "SELECT 1 FROM waiting_users WHERE user_id = %s", (uid,)
-                    )
+                    cur.execute("SELECT 1 FROM waiting_users WHERE user_id = %s", (uid,))
                     still_waiting = cur.fetchone()
                 if still_waiting:
                     link = f"https://t.me/{context.bot.username}?start={uid}"
@@ -500,7 +432,6 @@ async def match_user(
                         f"👑 VIP for {VIP_REFERRAL_DAYS} days!\n\n"
                         f"Your invite link:\n{link}",
                     )
-                # Reset flag so a future search can start a new timer
                 context.user_data["invite_timer"] = False
 
             asyncio.create_task(invite_prompt())
@@ -513,9 +444,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     with get_db() as (_, cur):
         cur.execute("DELETE FROM waiting_users WHERE user_id = %s", (uid,))
 
-    # Reset invite timer so next search can fire a fresh one
     context.user_data["invite_timer"] = False
-
     partner = get_partner(uid)
 
     if not partner:
@@ -537,6 +466,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 # ================= ROUTER =================
 
+# All buttons that should NOT be relayed to chat partner
 BUTTON_TEXTS = {
     "🚀 Find Partner", "👨 Find Male", "👩 Find Female",
     "⏭ Next", "❌ Stop", "💎 VIP", "🎁 Get FREE VIP",
@@ -581,7 +511,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit() or not (5 <= int(text) <= 120):
             await update.message.reply_text("Please enter a valid age.")
             return
-
         with get_db() as (_, cur):
             cur.execute(
                 "UPDATE users SET name=%s, gender=%s, country=%s, age=%s WHERE user_id=%s",
@@ -593,9 +522,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     uid,
                 ),
             )
-
         context.user_data["step"] = None
-
         referrer = context.user_data.pop("pending_referrer", None)
         if referrer:
             vip_granted = handle_referral(uid, referrer)
@@ -607,11 +534,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
-
         await update.message.reply_text("Registration complete 🎉", reply_markup=user_keyboard)
         return
 
-    # -------- ADMIN PANEL --------
+    # -------- ADMIN-ONLY BUTTONS --------
+    # Only buttons that ONLY exist in the admin panel go here.
+    # Shared buttons (Find Partner, VIP, etc.) are handled further below
+    # so both admin and regular users can use them.
 
     if uid == ADMIN_ID:
 
@@ -681,12 +610,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             await update.message.reply_text(f"📢 Announcement sent to {sent} users.")
             return
-            
+
         if text == "⬅ Back":
-            context.user_data.pop("announce_mode", None)
             await update.message.reply_text("Main menu", reply_markup=user_keyboard)
             return
-    # -------- USER BUTTONS --------
+
+    # -------- BUTTONS SHARED BY ADMIN AND USERS --------
 
     if text == "🚀 Find Partner":
         await match_user(update, context)
@@ -726,7 +655,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with get_db() as (_, cur):
                 cur.execute("SELECT vip_expiry FROM users WHERE user_id = %s", (uid,))
                 row = cur.fetchone()
-                expiry_str = row[0].strftime("%Y-%m-%d %H:%M UTC") if row and row[0] else "—"
+                expiry_str = row[0].strftime("%Y-%m-%d %H:%M UTC") if row and row[0] else "Permanent ♾️"
             msg = f"👑 VIP Status: {status}\nExpires: {expiry_str}"
         else:
             msg = f"👑 VIP Status: {status}\n\nVIP lets you filter partners by gender."
