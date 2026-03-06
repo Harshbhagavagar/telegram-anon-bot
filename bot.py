@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 
 import asyncpg
 
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -281,6 +282,35 @@ async def cleanchats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     cleaned = await clean_dead_chats(context.bot)
     await update.message.reply_text(f"✅ Done. Removed {cleaned} dead chat(s).")
 
+# ================= DEBUG REFERRAL =================
+
+async def debug_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /debugref <user_id>
+    Admin command to inspect referral state of any user.
+    """
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /debugref <user_id>")
+        return
+    target = int(context.args[0])
+    row = await db_pool.fetchrow(
+        "SELECT user_id, name, referred_by, referral_count, is_vip, vip_expiry FROM users WHERE user_id = $1",
+        target,
+    )
+    if not row:
+        await update.message.reply_text(f"User {target} not found.")
+        return
+    await update.message.reply_text(
+        f"🔍 Referral debug for {target}\n\n"
+        f"Name:           {row['name']}\n"
+        f"referred_by:    {row['referred_by']}\n"
+        f"referral_count: {row['referral_count']}\n"
+        f"is_vip:         {row['is_vip']}\n"
+        f"vip_expiry:     {row['vip_expiry']}\n"
+    )
+
 # ================= BROADCAST =================
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,16 +523,19 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     # Store in bot_data so the OTHER side (partner) can also report
     context.application.bot_data[f"last_partner_{partner}"] = uid
 
-    # User who pressed Stop — show chat ended + report button below
-    await update.message.reply_text("❌ Chat ended.", reply_markup=get_main_keyboard(uid))
+    # User who pressed Stop — inline Report button attached to the message
     await update.message.reply_text(
-        "Did something go wrong? Tap below to report.",
-        reply_markup=ReplyKeyboardMarkup(
-            [["⚠️ Report"]], resize_keyboard=True, one_time_keyboard=True
-        ),
+        "❌ Chat ended.",
+        reply_markup=get_main_keyboard(uid),
+    )
+    await update.message.reply_text(
+        "Did something go wrong?",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚠️ Report", callback_data=f"report:{partner}")
+        ]]),
     )
 
-    # Partner — notify them + also give report button
+    # Partner — same inline button
     try:
         await context.bot.send_message(
             partner,
@@ -511,15 +544,76 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         )
         await context.bot.send_message(
             partner,
-            "Did something go wrong? Tap below to report.",
-            reply_markup=ReplyKeyboardMarkup(
-                [["⚠️ Report"]], resize_keyboard=True, one_time_keyboard=True
-            ),
+            "Did something go wrong?",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚠️ Report", callback_data=f"report:{uid}")
+            ]]),
         )
     except Exception:
         logger.warning("Could not notify partner %s", partner)
 
     return True
+
+# ================= REPORT CALLBACK (inline button) =================
+
+async def report_callback(update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    uid     = query.from_user.id
+    data    = query.data  # "report:<partner_id>"
+
+    await query.answer()  # remove the loading spinner
+
+    try:
+        partner = int(data.split(":")[1])
+    except Exception:
+        await query.edit_message_text("⚠️ Invalid report.")
+        return
+
+    # 1-hour duplicate guard
+    existing = await db_pool.fetchrow(
+        """
+        SELECT 1 FROM reports
+        WHERE reporter_id = $1
+          AND reported_id = $2
+          AND created_at  > NOW() - INTERVAL '1 hour'
+        """,
+        uid, partner,
+    )
+    if existing:
+        await query.edit_message_text("You have already reported this user recently.")
+        return
+
+    await db_pool.execute(
+        "INSERT INTO reports (reporter_id, reported_id) VALUES ($1, $2)",
+        uid, partner,
+    )
+
+    report_count = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM reports WHERE reported_id = $1", partner
+    )
+    reported_row = await db_pool.fetchrow(
+        "SELECT username, name FROM users WHERE user_id = $1", partner
+    )
+    name     = (reported_row["name"]     or "Unknown") if reported_row else "Unknown"
+    username = (reported_row["username"] or "Unknown") if reported_row else "Unknown"
+
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🚨 New Report\n\n"
+            f"Reporter ID:  {uid}\n"
+            f"Reported ID:  {partner}\n"
+            f"Name:         {name}\n"
+            f"Username:     @{username}\n"
+            f"Total reports on this user: {report_count}\n\n"
+            f"To ban: /ban {partner}",
+        )
+    except Exception:
+        pass
+
+    await query.edit_message_text(
+        "✅ Report submitted. Thank you for keeping the community safe.\n\nThe admin has been notified."
+    )
 
 # ================= REPORT =================
 
@@ -661,8 +755,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["step"] = None
 
-        # Reward referrer AFTER full registration is confirmed
-        referrer = context.user_data.pop("pending_referrer", None)
+        # ── REFERRAL FIX ──
+        # Always read referred_by from the DB row — never lost on restart
+        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id = $1", uid)
+        referrer = ref_row["referred_by"] if ref_row else None
         if referrer:
             vip_granted = await handle_referral(uid, referrer)
             if vip_granted:
@@ -814,14 +910,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row   = await db_pool.fetchrow(
             "SELECT referral_count FROM users WHERE user_id = $1", uid
         )
-        count     = row["referral_count"] if row else 0
-        link      = f"https://t.me/{context.bot.username}?start={uid}"
-        progress  = count % VIP_REFERRAL_THRESHOLD
-        remaining = VIP_REFERRAL_THRESHOLD - progress
+        count    = row["referral_count"] if row else 0
+        link     = f"https://t.me/{context.bot.username}?start={uid}"
+        # Progress within current cycle (resets every VIP_REFERRAL_THRESHOLD)
+        cycle_progress = count % VIP_REFERRAL_THRESHOLD
+        remaining      = VIP_REFERRAL_THRESHOLD - cycle_progress
+        total_vips     = count // VIP_REFERRAL_THRESHOLD
         await update.message.reply_text(
             f"🎁 Invite friends to get FREE VIP!\n\n"
-            f"Your link:\n{link}\n\n"
-            f"Progress: {progress}/{VIP_REFERRAL_THRESHOLD}\n"
+            f"Your invite link:\n{link}\n\n"
+            f"📊 Total referrals: {count}\n"
+            f"🔄 Current cycle: {cycle_progress}/{VIP_REFERRAL_THRESHOLD}\n"
+            f"🏆 VIPs earned: {total_vips}\n\n"
             f"Invite {remaining} more friend(s) to unlock "
             f"👑 VIP for {VIP_REFERRAL_DAYS} days!"
         )
@@ -927,6 +1027,8 @@ async def main():
     app.add_handler(CommandHandler("ban",        handle_ban))
     app.add_handler(CommandHandler("unban",      handle_ban))
     app.add_handler(CommandHandler("cleanchats", cleanchats_command))
+    app.add_handler(CommandHandler("debugref",   debug_referral))
+    app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
 
     logger.info("Bot started")
