@@ -69,14 +69,12 @@ async def init_db():
     """)
     await db_pool.execute("""
         CREATE TABLE IF NOT EXISTS reports (
-            id            SERIAL PRIMARY KEY,
-            reporter_id   BIGINT NOT NULL,
-            reported_id   BIGINT NOT NULL,
-            reason        TEXT,
-            created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            id          SERIAL PRIMARY KEY,
+            reporter_id BIGINT NOT NULL,
+            reported_id BIGINT NOT NULL,
+            created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
-    # Indexes
     await db_pool.execute("""
         CREATE INDEX IF NOT EXISTS idx_waiting_queue ON waiting_users (queued_at)
     """)
@@ -86,10 +84,14 @@ async def init_db():
     await db_pool.execute("""
         CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports (reported_id)
     """)
-    # Migrations for existing DBs
-    await db_pool.execute("""
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE
-    """)
+    # Safe migrations for existing databases
+    await db_pool.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"
+    )
+    await db_pool.execute(
+        "ALTER TABLE waiting_users ADD COLUMN IF NOT EXISTS queued_at "
+        "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+    )
     logger.info("Database initialised and migrated successfully")
 
 # ================= KEYBOARDS =================
@@ -100,15 +102,6 @@ user_keyboard = ReplyKeyboardMarkup(
         ["👨 Find Male", "👩 Find Female"],
         ["⏭ Next", "❌ Stop"],
         ["💎 VIP"],
-    ],
-    resize_keyboard=True,
-)
-
-# Shown when user is actively chatting — report button appears here
-chat_keyboard = ReplyKeyboardMarkup(
-    [
-        ["⏭ Next", "❌ Stop"],
-        ["⚠️ Report"],
     ],
     resize_keyboard=True,
 )
@@ -129,7 +122,6 @@ admin_panel_keyboard = ReplyKeyboardMarkup(
         ["📊 Analytics"],
         ["📢 Announcement"],
         ["👥 Active Users", "🕒 Waiting Users"],
-        ["👑 VIP Toggle"],
         ["🧹 Clean Dead Chats"],
         ["⬅ Back"],
     ],
@@ -188,37 +180,24 @@ async def check_vip(uid: int) -> bool:
     )
     if not row:
         return False
+    # Permanent VIP — manually set in DB with no expiry
     if row["is_vip"] and row["vip_expiry"] is None:
         return True
+    # Timed VIP
     if row["vip_expiry"] and row["vip_expiry"] > datetime.now(timezone.utc):
         return True
     return False
 
 
-async def grant_vip(uid: int, days: int):
-    row = await db_pool.fetchrow(
-        """
-        UPDATE users
-        SET is_vip     = TRUE,
-            vip_expiry = GREATEST(NOW(), COALESCE(vip_expiry, NOW()))
-                         + ($1 || ' days')::INTERVAL
-        WHERE user_id = $2
-        RETURNING vip_expiry
-        """,
-        days, uid,
-    )
-    return row["vip_expiry"] if row else None
-
-
-async def revoke_vip(uid: int):
-    await db_pool.execute(
-        "UPDATE users SET is_vip = FALSE, vip_expiry = NULL WHERE user_id = $1", uid
-    )
-
-
 async def handle_referral(new_uid: int, referrer_uid: int) -> bool:
+    """
+    Called after new user fully completes registration (name+gender+country+age).
+    Increments referrer's count. Grants VIP if threshold reached.
+    Returns True if VIP was granted.
+    """
     if referrer_uid == new_uid:
         return False
+    # Only reward after full registration is confirmed
     if not await is_registered(new_uid):
         return False
     row = await db_pool.fetchrow(
@@ -231,15 +210,23 @@ async def handle_referral(new_uid: int, referrer_uid: int) -> bool:
         referrer_uid,
     )
     if row and row["referral_count"] % VIP_REFERRAL_THRESHOLD == 0:
-        await grant_vip(referrer_uid, VIP_REFERRAL_DAYS)
+        await db_pool.execute(
+            """
+            UPDATE users
+            SET is_vip     = TRUE,
+                vip_expiry = GREATEST(NOW(), COALESCE(vip_expiry, NOW()))
+                             + ($1 || ' days')::INTERVAL
+            WHERE user_id = $2
+            """,
+            VIP_REFERRAL_DAYS, referrer_uid,
+        )
         return True
     return False
 
 # ================= CLEAN DEAD CHATS =================
 
 async def clean_dead_chats(bot) -> int:
-    rows = await db_pool.fetch("SELECT DISTINCT user_id, partner_id FROM active_chats")
-
+    rows    = await db_pool.fetch("SELECT DISTINCT user_id, partner_id FROM active_chats")
     seen    = set()
     cleaned = 0
 
@@ -269,15 +256,18 @@ async def clean_dead_chats(bot) -> int:
             await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", partner)
             cleaned += 1
             logger.info("Cleaned dead chat: %s <-> %s", uid, partner)
-
             if uid_alive:
                 try:
-                    await bot.send_message(uid, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                    await bot.send_message(
+                        uid, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again."
+                    )
                 except Exception:
                     pass
             if partner_alive:
                 try:
-                    await bot.send_message(partner, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
+                    await bot.send_message(
+                        partner, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again."
+                    )
                 except Exception:
                     pass
 
@@ -311,62 +301,18 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Sent to {sent} users")
 
-# ================= VIP TOGGLE =================
-
-async def handle_vip_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(
-            "Usage:\n"
-            "/vip <user_id>         → grant 30 days\n"
-            "/vip <user_id> <days>  → grant N days\n"
-            "/vip <user_id> 0       → revoke VIP"
-        )
-        return
-    target_uid = int(args[0])
-    days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 30
-    if not await user_exists(target_uid):
-        await update.message.reply_text(f"❌ User {target_uid} not found.")
-        return
-    if days == 0:
-        await revoke_vip(target_uid)
-        await update.message.reply_text(f"✅ VIP revoked for user {target_uid}.")
-        try:
-            await context.bot.send_message(target_uid, "ℹ️ Your VIP has been removed by an admin.")
-        except Exception:
-            pass
-    else:
-        expiry = await grant_vip(target_uid, days)
-        expiry_str = expiry.strftime("%Y-%m-%d %H:%M UTC") if expiry else "unknown"
-        await update.message.reply_text(
-            f"✅ Granted {days} days VIP to user {target_uid}.\nExpires: {expiry_str}"
-        )
-        try:
-            await context.bot.send_message(
-                target_uid,
-                f"🎉 An admin has granted you 👑 VIP for {days} days!\nExpires: {expiry_str}",
-            )
-        except Exception:
-            pass
-
 # ================= BAN / UNBAN =================
 
 async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /ban <user_id>    → ban user
-    /unban <user_id>  → unban user
-    """
     if update.message.from_user.id != ADMIN_ID:
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /ban <user_id> or /unban <user_id>")
         return
 
-    target_uid  = int(context.args[0])
-    is_unban    = update.message.text.startswith("/unban")
-    ban_value   = False if is_unban else True
+    target_uid = int(context.args[0])
+    is_unban   = update.message.text.startswith("/unban")
+    ban_value  = not is_unban
 
     if not await user_exists(target_uid):
         await update.message.reply_text(f"❌ User {target_uid} not found.")
@@ -377,7 +323,6 @@ async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if ban_value:
-        # Kick from any active chat
         partner = await get_partner(target_uid)
         if partner:
             await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", target_uid)
@@ -395,7 +340,9 @@ async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"✅ User {target_uid} has been unbanned.")
         try:
-            await context.bot.send_message(target_uid, "✅ Your ban has been lifted. You can use the bot again.")
+            await context.bot.send_message(
+                target_uid, "✅ Your ban has been lifted. You can use the bot again."
+            )
         except Exception:
             pass
 
@@ -410,12 +357,11 @@ async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, pref: s
 
     await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", uid)
 
-    row = await db_pool.fetchrow("SELECT gender FROM users WHERE user_id = $1", uid)
+    row       = await db_pool.fetchrow("SELECT gender FROM users WHERE user_id = $1", uid)
     my_gender = row["gender"] if row else None
 
     partner = None
 
-    # Use a dedicated connection with a transaction for the advisory lock
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             if pref:
@@ -462,8 +408,9 @@ async def match_user(update: Update, context: ContextTypes.DEFAULT_TYPE, pref: s
                 )
                 if not still_waiting:
                     continue
-
-                await conn.execute("DELETE FROM waiting_users WHERE user_id = $1", candidate)
+                await conn.execute(
+                    "DELETE FROM waiting_users WHERE user_id = $1", candidate
+                )
                 await conn.execute(
                     """
                     INSERT INTO active_chats VALUES ($1, $2)
@@ -540,21 +487,35 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", uid)
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", partner)
 
-    # Store last partner so Report button can reference it after chat ends
+    # Store last_partner so the user who pressed Stop can report
     context.user_data["last_partner"] = partner
 
+    # Store in bot_data so the OTHER side (partner) can also report
+    context.application.bot_data[f"last_partner_{partner}"] = uid
+
+    # User who pressed Stop — show chat ended + report button below
     await update.message.reply_text("❌ Chat ended.", reply_markup=get_main_keyboard(uid))
     await update.message.reply_text(
-        "Did something go wrong? You can report this user.",
+        "Did something go wrong? Tap below to report.",
         reply_markup=ReplyKeyboardMarkup(
-            [["⚠️ Report"]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
+            [["⚠️ Report"]], resize_keyboard=True, one_time_keyboard=True
         ),
     )
 
+    # Partner — notify them + also give report button
     try:
-        await context.bot.send_message(partner, "👋 Stranger left the chat.")
+        await context.bot.send_message(
+            partner,
+            "👋 Stranger left the chat.",
+            reply_markup=get_main_keyboard(partner),
+        )
+        await context.bot.send_message(
+            partner,
+            "Did something go wrong? Tap below to report.",
+            reply_markup=ReplyKeyboardMarkup(
+                [["⚠️ Report"]], resize_keyboard=True, one_time_keyboard=True
+            ),
+        )
     except Exception:
         logger.warning("Could not notify partner %s", partner)
 
@@ -563,17 +524,18 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 # ================= REPORT =================
 
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Can be called:
-    - During an active chat (reports current partner)
-    - Right after chat ends via ⚠️ Report Last Partner button (reports last_partner)
-    """
-    uid     = update.message.from_user.id
+    uid = update.message.from_user.id
+
+    # Priority 1: currently in active chat
     partner = await get_partner(uid)
 
-    # If not in active chat, check if they just ended one
+    # Priority 2: just ended chat — user who pressed Stop
     if not partner:
         partner = context.user_data.get("last_partner")
+
+    # Priority 3: the other side — partner who got left
+    if not partner:
+        partner = context.application.bot_data.pop(f"last_partner_{uid}", None)
 
     if not partner:
         await update.message.reply_text(
@@ -581,11 +543,12 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_keyboard(uid),
         )
         return
-    
-    # Clear last_partner so it can't be reported again
-    context.user_data.pop("last_partner", None)
 
-    # Check if already reported this partner in this session
+    # Clear so it can't be reused
+    context.user_data.pop("last_partner", None)
+    context.application.bot_data.pop(f"last_partner_{uid}", None)
+
+    # Duplicate protection — 1 hour cooldown
     existing = await db_pool.fetchrow(
         """
         SELECT 1 FROM reports
@@ -595,21 +558,21 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid, partner,
     )
     if existing:
-        await update.message.reply_text("You have already reported this user recently.")
+        await update.message.reply_text(
+            "You have already reported this user recently.",
+            reply_markup=get_main_keyboard(uid),
+        )
         return
 
-    # Save report
     await db_pool.execute(
         "INSERT INTO reports (reporter_id, reported_id) VALUES ($1, $2)",
         uid, partner,
     )
 
-    # Count total reports against this user
     report_count = await db_pool.fetchval(
         "SELECT COUNT(*) FROM reports WHERE reported_id = $1", partner
     )
 
-    # Notify admin
     reported_user = await db_pool.fetchrow(
         "SELECT username, name FROM users WHERE user_id = $1", partner
     )
@@ -631,12 +594,9 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     await update.message.reply_text(
-        "✅ Report submitted. Thank you for keeping the community safe.\n\n"
-        "The admin has been notified."
+        "✅ Report submitted. The admin has been notified.",
+        reply_markup=get_main_keyboard(uid),
     )
-
-    # Auto-end the chat after report so the user isn't stuck with someone they reported
-    await stop_chat(update, context)
 
 # ================= ROUTER =================
 
@@ -644,9 +604,9 @@ BUTTON_TEXTS = {
     "🚀 Find Partner", "👨 Find Male", "👩 Find Female",
     "⏭ Next", "❌ Stop", "💎 VIP", "🎁 Get FREE VIP",
     "👑 Contact Admin", "⬅ Back", "⚙️ Admin Panel",
-    "⚠️ Report", "⚠️ Report Last Partner",
+    "⚠️ Report",
     "📊 Analytics", "👥 Active Users", "🕒 Waiting Users",
-    "📢 Announcement", "👑 VIP Toggle", "🧹 Clean Dead Chats",
+    "📢 Announcement", "🧹 Clean Dead Chats",
 }
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -656,7 +616,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.message.from_user.id
     text = update.message.text or ""
 
-    # Block banned users entirely
+    # Block banned users
     if await is_banned(uid):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
@@ -690,6 +650,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit() or not (5 <= int(text) <= 120):
             await update.message.reply_text("Please enter a valid age.")
             return
+
         await db_pool.execute(
             "UPDATE users SET name=$1, gender=$2, country=$3, age=$4 WHERE user_id=$5",
             context.user_data["name"],
@@ -699,6 +660,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uid,
         )
         context.user_data["step"] = None
+
+        # Reward referrer AFTER full registration is confirmed
         referrer = context.user_data.pop("pending_referrer", None)
         if referrer:
             vip_granted = await handle_referral(uid, referrer)
@@ -710,6 +673,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
+
         await update.message.reply_text("Registration complete 🎉", reply_markup=user_keyboard)
         return
 
@@ -725,14 +689,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid == ADMIN_ID and context.user_data.get("in_admin_panel"):
 
         if text == "📊 Analytics":
-            total      = await db_pool.fetchval("SELECT COUNT(*) FROM users")
-            active     = (await db_pool.fetchval("SELECT COUNT(*) FROM active_chats") or 0) // 2
-            waiting    = await db_pool.fetchval("SELECT COUNT(*) FROM waiting_users")
-            vip_count  = await db_pool.fetchval(
+            total     = await db_pool.fetchval("SELECT COUNT(*) FROM users")
+            active    = (await db_pool.fetchval("SELECT COUNT(*) FROM active_chats") or 0) // 2
+            waiting   = await db_pool.fetchval("SELECT COUNT(*) FROM waiting_users")
+            vip_count = await db_pool.fetchval(
                 "SELECT COUNT(*) FROM users WHERE (is_vip = TRUE AND vip_expiry IS NULL) OR vip_expiry > NOW()"
             )
-            banned     = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE")
-            reports    = await db_pool.fetchval("SELECT COUNT(*) FROM reports")
+            banned  = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE")
+            reports = await db_pool.fetchval("SELECT COUNT(*) FROM reports")
             await update.message.reply_text(
                 f"📊 Analytics\n\n"
                 f"👤 Total users:   {total}\n"
@@ -754,15 +718,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔎 Waiting users: {waiting}")
             return
 
-        if text == "👑 VIP Toggle":
-            await update.message.reply_text(
-                "Use the /vip command to manage VIP:\n\n"
-                "/vip <user_id>         → grant 30 days\n"
-                "/vip <user_id> <days>  → grant N days\n"
-                "/vip <user_id> 0       → revoke VIP"
-            )
-            return
-
         if text == "🧹 Clean Dead Chats":
             await update.message.reply_text("🔍 Scanning for dead chats...")
             cleaned = await clean_dead_chats(context.bot)
@@ -777,7 +732,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("announce_mode"):
             if text == "⬅ Back":
                 context.user_data["announce_mode"] = False
-                await update.message.reply_text("Announcement cancelled.", reply_markup=admin_panel_keyboard)
+                await update.message.reply_text(
+                    "Announcement cancelled.", reply_markup=admin_panel_keyboard
+                )
                 return
             context.user_data["announce_mode"] = False
             rows = await db_pool.fetch("SELECT user_id FROM users")
@@ -831,7 +788,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_chat(update, context)
         return
 
-    if text == "⚠️ Report" or text == "⚠️ Report Last Partner":
+    if text == "⚠️ Report":
         await handle_report(update, context)
         return
 
@@ -839,8 +796,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_active = await check_vip(uid)
         status    = "✅ Active" if is_active else "❌ Inactive"
         if is_active:
-            row = await db_pool.fetchrow("SELECT vip_expiry FROM users WHERE user_id = $1", uid)
-            expiry_str = row["vip_expiry"].strftime("%Y-%m-%d %H:%M UTC") if row and row["vip_expiry"] else "Permanent ♾️"
+            row = await db_pool.fetchrow(
+                "SELECT vip_expiry FROM users WHERE user_id = $1", uid
+            )
+            expiry_str = (
+                row["vip_expiry"].strftime("%Y-%m-%d %H:%M UTC")
+                if row and row["vip_expiry"]
+                else "Permanent ♾️"
+            )
             msg = f"👑 VIP Status: {status}\nExpires: {expiry_str}"
         else:
             msg = f"👑 VIP Status: {status}\n\nVIP lets you filter partners by gender."
@@ -848,8 +811,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "🎁 Get FREE VIP":
-        row   = await db_pool.fetchrow("SELECT referral_count FROM users WHERE user_id = $1", uid)
-        count = row["referral_count"] if row else 0
+        row   = await db_pool.fetchrow(
+            "SELECT referral_count FROM users WHERE user_id = $1", uid
+        )
+        count     = row["referral_count"] if row else 0
         link      = f"https://t.me/{context.bot.username}?start={uid}"
         progress  = count % VIP_REFERRAL_THRESHOLD
         remaining = VIP_REFERRAL_THRESHOLD - progress
@@ -879,7 +844,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await update.message.copy(chat_id=partner)
                 await db_pool.execute(
-                    "UPDATE users SET total_messages = total_messages + 1 WHERE user_id = $1", uid
+                    "UPDATE users SET total_messages = total_messages + 1 WHERE user_id = $1",
+                    uid,
                 )
             except Exception:
                 logger.warning("Partner %s unreachable, ending chat", partner)
@@ -900,7 +866,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid      = update.message.from_user.id
     username = update.message.from_user.username
 
-    # Block banned users
     if await is_banned(uid):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
@@ -929,6 +894,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Welcome back! 👋", reply_markup=user_keyboard)
         return
 
+    # Insert skeleton row — name/gender/country/age filled during registration flow
     await db_pool.execute(
         "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         uid, username, ref,
@@ -947,7 +913,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     global db_pool
 
-    # asyncpg needs postgresql:// not postgres://
     dsn = DATABASE_URL
     if dsn and dsn.startswith("postgres://"):
         dsn = dsn.replace("postgres://", "postgresql://", 1)
@@ -959,7 +924,6 @@ async def main():
 
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("broadcast",  broadcast))
-    app.add_handler(CommandHandler("vip",        handle_vip_toggle))
     app.add_handler(CommandHandler("ban",        handle_ban))
     app.add_handler(CommandHandler("unban",      handle_ban))
     app.add_handler(CommandHandler("cleanchats", cleanchats_command))
@@ -970,7 +934,6 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Keep running until interrupted
     await asyncio.Event().wait()
 
 
