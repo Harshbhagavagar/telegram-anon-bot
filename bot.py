@@ -661,6 +661,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if context.user_data.get("announce_mode"):
+            if text == "⬅ Back":
+                context.user_data["announce_mode"] = False
+                await update.message.reply_text("Announcement cancelled.", reply_markup=admin_keyboard)
+                return
             context.user_data["announce_mode"] = False
             with get_db() as (_, cur):
                 cur.execute("SELECT user_id FROM users")
@@ -675,7 +679,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             await update.message.reply_text(f"📢 Announcement sent to {sent} users.")
             return
-
+            
         if text == "⬅ Back":
             context.user_data.pop("announce_mode", None)
             await update.message.reply_text("Main menu", reply_markup=user_keyboard)
