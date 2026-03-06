@@ -9,6 +9,7 @@ import asyncpg
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -706,41 +707,23 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             step = await get_registration_step(uid)
             if step:
                 context.user_data["step"] = step
-                # Resume from wherever they left off
+                # Each field is saved to DB immediately, so we can safely resume
                 if step == "name":
                     await update.message.reply_text(
                         "Let's finish your profile.\n\nEnter your name:"
                     )
                     return
                 elif step == "gender":
-                    # We have name stored in DB? No — name is in context.
-                    # If name is missing from context AND DB, restart from name.
-                    if not context.user_data.get("name"):
-                        context.user_data["step"] = "name"
-                        await update.message.reply_text(
-                            "Let's finish your profile.\n\nEnter your name:"
-                        )
-                        return
                     await update.message.reply_text(
                         "Select your gender:", reply_markup=gender_keyboard
                     )
                     return
                 elif step == "country":
-                    if not context.user_data.get("gender"):
-                        context.user_data["step"] = "name"
-                        await update.message.reply_text(
-                            "Let's finish your profile.\n\nEnter your name:"
-                        )
-                        return
-                    await update.message.reply_text("Enter your country:")
+                    await update.message.reply_text(
+                        "Enter your country:", reply_markup=ReplyKeyboardRemove()
+                    )
                     return
                 elif step == "age":
-                    if not context.user_data.get("country"):
-                        context.user_data["step"] = "name"
-                        await update.message.reply_text(
-                            "Let's finish your profile.\n\nEnter your name:"
-                        )
-                        return
                     await update.message.reply_text("Enter your age:")
                     return
 
@@ -752,7 +735,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text or text in BUTTON_TEXTS:
             await update.message.reply_text("Please enter your name:")
             return
-        context.user_data["name"] = text
+        # Save name to DB immediately — survives bot restart
+        await db_pool.execute(
+            "UPDATE users SET name=$1 WHERE user_id=$2", text, uid
+        )
         context.user_data["step"] = "gender"
         await update.message.reply_text(
             "Select your gender:", reply_markup=gender_keyboard
@@ -766,17 +752,26 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=gender_keyboard,
             )
             return
-        context.user_data["gender"] = text
-        context.user_data["step"]   = "country"
-        await update.message.reply_text("Enter your country:")
+        # Save gender to DB immediately
+        await db_pool.execute(
+            "UPDATE users SET gender=$1 WHERE user_id=$2", text, uid
+        )
+        context.user_data["step"] = "country"
+        await update.message.reply_text(
+            "Enter your country:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return
 
     if step == "country":
         if not text or text in BUTTON_TEXTS:
             await update.message.reply_text("Please enter your country:")
             return
-        context.user_data["country"] = text
-        context.user_data["step"]    = "age"
+        # Save country to DB immediately
+        await db_pool.execute(
+            "UPDATE users SET country=$1 WHERE user_id=$2", text, uid
+        )
+        context.user_data["step"] = "age"
         await update.message.reply_text("Enter your age:")
         return
 
@@ -785,13 +780,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Please enter a valid age (5-120).")
             return
 
+        # Save age to DB — registration now complete
         await db_pool.execute(
-            "UPDATE users SET name=$1, gender=$2, country=$3, age=$4 WHERE user_id=$5",
-            context.user_data["name"],
-            context.user_data["gender"],
-            context.user_data["country"],
-            int(text),
-            uid,
+            "UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid
         )
         context.user_data["step"] = None
 
