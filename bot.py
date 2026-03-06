@@ -192,17 +192,19 @@ def get_partner(uid: int):
 
 
 def check_vip(uid: int) -> bool:
-    """
-    Pure read — never writes to DB.
-    Source of truth is vip_expiry only.
-    """
     with get_db() as (_, cur):
-        cur.execute("SELECT vip_expiry FROM users WHERE user_id = %s", (uid,))
+        cur.execute("SELECT is_vip, vip_expiry FROM users WHERE user_id = %s", (uid,))
         row = cur.fetchone()
         if not row:
             return False
-        expiry = row[0]
-        return bool(expiry and expiry > datetime.now(timezone.utc))
+        is_vip, expiry = row
+        # Active if is_vip is True with no expiry (permanent)
+        if is_vip and expiry is None:
+            return True
+        # Active if expiry is set and still in the future
+        if expiry and expiry > datetime.now(timezone.utc):
+            return True
+        return False
 
 
 def grant_vip(uid: int, days: int):
