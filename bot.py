@@ -375,8 +375,14 @@ async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cleanup_null_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    # Delete ALL users who haven't completed registration (missing name OR gender)
     rows = await db_pool.fetch(
-        "SELECT user_id FROM users WHERE name IS NULL AND user_id != $1", ADMIN_ID
+        """
+        SELECT user_id FROM users
+        WHERE (name IS NULL OR gender IS NULL)
+          AND user_id != $1
+        """,
+        ADMIN_ID,
     )
     if not rows:
         await update.message.reply_text("✅ No incomplete registrations found.")
@@ -391,7 +397,7 @@ async def cleanup_null_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "DELETE FROM reports WHERE reporter_id = $1 OR reported_id = $1", uid
         )
         await db_pool.execute("DELETE FROM users WHERE user_id = $1", uid)
-    await update.message.reply_text(f"🗑 Removed {count} incomplete user(s).")
+    await update.message.reply_text(f"🗑 Removed {count} incomplete user(s) (missing name or gender).")
 
 # ================= DEBUG REFERRAL =================
 
@@ -663,19 +669,30 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── REGISTRATION RECOVERY ──
-    # Only recover from DB if context has NO step set (e.g. after bot restart).
-    # If step is already set in context, trust it — do not overwrite.
+    # If context was wiped by a bot restart, restore step from DB and re-prompt.
+    # Only fires when step is not already in context.
     if uid != ADMIN_ID and context.user_data.get("step") is None:
-        # Only recover registration for users who have NOT completed name+gender.
-        # Users with name+gender but NULL age/country are fully registered — leave them alone.
         if await user_exists(uid) and not await is_registered(uid):
             db_step = await get_registration_step(uid)
             if db_step:
                 context.user_data["step"] = db_step
                 logger.info("Recovered step=%s for uid=%s from DB", db_step, uid)
+                # Re-prompt immediately so user knows what to send
+                if db_step == "name":
+                    await update.message.reply_text("Please enter your name:")
+                elif db_step == "gender":
+                    await update.message.reply_text(
+                        "Please select your gender:", reply_markup=gender_keyboard
+                    )
+                elif db_step == "country":
+                    await update.message.reply_text(
+                        "Please enter your country:", reply_markup=ReplyKeyboardRemove()
+                    )
+                elif db_step == "age":
+                    await update.message.reply_text("Please enter your age:")
+                # Now fall through so if the current message IS the answer, it gets processed
 
     step = context.user_data.get("step")
-    logger.debug("router uid=%s step=%s text=%r", uid, step, text[:20] if text else "")
 
     # ── REGISTRATION FLOW ──
     # Only intercept text messages during registration.
