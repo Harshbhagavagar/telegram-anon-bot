@@ -132,7 +132,7 @@ admin_panel_keyboard = ReplyKeyboardMarkup(
         ["📊 Analytics"],
         ["📢 Announcement"],
         ["👥 Active Users", "🕒 Waiting Users"],
-        ["🧹 Clean Dead Chats"],
+        ["👑 VIP Users", "🧹 Clean Dead Chats"],
         ["⬅ Back"],
     ],
     resize_keyboard=True,
@@ -196,20 +196,28 @@ async def check_vip(uid: int) -> bool:
     )
     if not row:
         return False
+    # Permanent VIP: is_vip=TRUE with no expiry (admin/manually granted)
     if row["is_vip"] and row["vip_expiry"] is None:
         return True
+    # Timed VIP: expiry exists and is in the future
     if row["vip_expiry"] and row["vip_expiry"] > datetime.now(timezone.utc):
         return True
+    # Expired — clean up is_vip flag so DB stays consistent
+    if row["is_vip"] and row["vip_expiry"] and row["vip_expiry"] <= datetime.now(timezone.utc):
+        await db_pool.execute(
+            "UPDATE users SET is_vip=FALSE WHERE user_id=$1", uid
+        )
     return False
 
 
 async def grant_vip(uid: int, days: int):
+    # Cast to text then interval — most reliable with asyncpg positional params
     await db_pool.execute(
         """
         UPDATE users
         SET is_vip     = TRUE,
             vip_expiry = GREATEST(NOW(), COALESCE(vip_expiry, NOW()))
-                         + ($1 || ' days')::INTERVAL
+                         + ($1 * INTERVAL '1 day')
         WHERE user_id  = $2
         """,
         days, uid,
@@ -652,7 +660,7 @@ BUTTON_TEXTS = {
     "👑 Contact Admin", "⬅ Back", "⚙️ Admin Panel",
     "⚠️ Report",
     "📊 Analytics", "👥 Active Users", "🕒 Waiting Users",
-    "📢 Announcement", "🧹 Clean Dead Chats",
+    "📢 Announcement", "🧹 Clean Dead Chats", "👑 VIP Users",
     "Male", "Female",
 }
 
@@ -810,6 +818,29 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔎 Waiting users: {waiting}")
             return
 
+        if text == "👑 VIP Users":
+            rows = await db_pool.fetch(
+                """
+                SELECT user_id, username, name, is_vip, vip_expiry, referral_count
+                FROM users
+                WHERE (is_vip = TRUE AND vip_expiry IS NULL)
+                   OR vip_expiry > NOW()
+                ORDER BY vip_expiry ASC NULLS FIRST
+                LIMIT 20
+                """
+            )
+            if not rows:
+                await update.message.reply_text("No active VIP users.")
+                return
+            lines = ["👑 Active VIP Users\n"]
+            for r in rows:
+                name     = r["name"]     or "Unknown"
+                username = f"@{r['username']}" if r["username"] else "no username"
+                expiry   = "Permanent ♾️" if r["vip_expiry"] is None else r["vip_expiry"].strftime("%Y-%m-%d")
+                lines.append(f"• {name} ({username})\n  ID: {r['user_id']} | Refs: {r['referral_count']} | Expires: {expiry}")
+            await update.message.reply_text("\n".join(lines))
+            return
+
         if text == "🧹 Clean Dead Chats":
             await update.message.reply_text("🔍 Scanning for dead chats...")
             cleaned = await clean_dead_chats(context.bot)
@@ -926,7 +957,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "⬅ Back":
         context.user_data.pop("announce_mode", None)
-        await update.message.reply_text("Main menu", reply_markup=get_main_keyboard(uid))
+        context.user_data.pop("in_admin_panel", None)
+        await update.message.reply_text("Main menu 👇", reply_markup=get_main_keyboard(uid))
         return
 
     # ── RELAY MESSAGE / MEDIA TO PARTNER ──
