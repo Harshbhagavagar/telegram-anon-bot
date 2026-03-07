@@ -246,7 +246,6 @@ async def get_registration_step(uid: int) -> str | None:
         return None
     if row["name"]   is None: return "name"
     if row["gender"] is None: return "gender"
-    # Only ask country/age if they haven't answered yet AND name+gender are done
     if row["country"] is None: return "country"
     if row["age"]     is None: return "age"
     return None
@@ -667,6 +666,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Only recover from DB if context has NO step set (e.g. after bot restart).
     # If step is already set in context, trust it — do not overwrite.
     if uid != ADMIN_ID and context.user_data.get("step") is None:
+        # Only recover registration for users who have NOT completed name+gender.
+        # Users with name+gender but NULL age/country are fully registered — leave them alone.
         if await user_exists(uid) and not await is_registered(uid):
             db_step = await get_registration_step(uid)
             if db_step:
@@ -836,7 +837,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "👨 Find Male":
-        if await check_vip(uid):
+        if uid == ADMIN_ID or await check_vip(uid):
             await match_user(update, context, "Male")
         else:
             await update.message.reply_text(
@@ -845,7 +846,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "👩 Find Female":
-        if await check_vip(uid):
+        if uid == ADMIN_ID or await check_vip(uid):
             await match_user(update, context, "Female")
         else:
             await update.message.reply_text(
@@ -863,6 +864,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "💎 VIP":
+        if uid == ADMIN_ID:
+            await update.message.reply_text(
+                "👑 VIP Status: ✅ Active\nExpires: Permanent ♾️",
+                reply_markup=vip_keyboard,
+            )
+            return
         is_active = await check_vip(uid)
         status    = "✅ Active" if is_active else "❌ Inactive"
         if is_active:
@@ -962,7 +969,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             INSERT INTO users (user_id, username, name, gender, is_vip)
             VALUES ($1, $2, 'Admin', 'Male', TRUE)
-            ON CONFLICT (user_id) DO NOTHING
+            ON CONFLICT (user_id) DO UPDATE SET is_vip = TRUE, vip_expiry = NULL
             """,
             uid, username,
         )
@@ -974,12 +981,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if await user_exists(uid):
         if not await is_registered(uid):
+            # Truly incomplete — missing name or gender
             context.user_data.clear()
-            context.user_data["step"] = "name"
-            await update.message.reply_text(
-                "Let's finish your profile.\n\nEnter your name:"
-            )
+            db_step = await get_registration_step(uid)
+            context.user_data["step"] = db_step or "name"
+            if db_step == "gender":
+                await update.message.reply_text(
+                    "Let's finish your profile.\n\nSelect your gender:",
+                    reply_markup=gender_keyboard,
+                )
+            else:
+                await update.message.reply_text(
+                    "Let's finish your profile.\n\nEnter your name:"
+                )
         else:
+            # Has name+gender — fully usable regardless of age/country
             await update.message.reply_text("Welcome back! 👋", reply_markup=user_keyboard)
         return
 
