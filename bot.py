@@ -758,106 +758,95 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
 
-    # ── REGISTRATION RECOVERY ──
-    # If context was wiped by a bot restart, restore step from DB and re-prompt.
-    # Only fires when step is not already in context.
-    if uid != ADMIN_ID and context.user_data.get("step") is None:
+    # ── REGISTRATION GATE ──
+    # If user exists but is NOT registered, force them through registration.
+    # Nothing works until name + gender are set. No buttons, no relay, nothing.
+    if uid != ADMIN_ID:
         if await user_exists(uid) and not await is_registered(uid):
-            db_step = await get_registration_step(uid)
-            if db_step:
-                context.user_data["step"] = db_step
-                logger.info("Recovered step=%s for uid=%s from DB", db_step, uid)
-                # Re-prompt immediately so user knows what to send
-                if db_step == "name":
-                    await update.message.reply_text("Please enter your name:")
-                elif db_step == "gender":
+            # Restore step from DB if context was wiped (bot restart)
+            if context.user_data.get("step") is None:
+                db_step = await get_registration_step(uid)
+                context.user_data["step"] = db_step or "name"
+                logger.info("Recovered step=%s for uid=%s", context.user_data["step"], uid)
+
+            step = context.user_data.get("step")
+
+            # Handle their answer first, then re-prompt if still not done
+            if step == "name":
+                if text and text not in BUTTON_TEXTS:
+                    await db_pool.execute("UPDATE users SET name=$1 WHERE user_id=$2", text, uid)
+                    context.user_data["step"] = "gender"
+                    await update.message.reply_text("Select your gender:", reply_markup=gender_keyboard)
+                else:
+                    await update.message.reply_text("👋 Please enter your name to continue:")
+                return
+
+            if step == "gender":
+                if text in ("Male", "Female"):
+                    await db_pool.execute("UPDATE users SET gender=$1 WHERE user_id=$2", text, uid)
+                    context.user_data["step"] = "country"
+                    await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
+                else:
+                    await update.message.reply_text("Please select your gender:", reply_markup=gender_keyboard)
+                return
+
+            if step == "country":
+                if text and text not in BUTTON_TEXTS:
+                    await db_pool.execute("UPDATE users SET country=$1 WHERE user_id=$2", text, uid)
+                    context.user_data["step"] = "age"
+                    await update.message.reply_text("Enter your age:")
+                else:
+                    await update.message.reply_text("Please enter your country:")
+                return
+
+            if step == "age":
+                if text and text.isdigit() and 5 <= int(text) <= 120:
+                    try:
+                        await db_pool.execute("UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid)
+                    except Exception as e:
+                        logger.error("Failed saving age for %s: %s", uid, e)
+                        await update.message.reply_text("Something went wrong. Please try again.")
+                        return
+                    context.user_data.clear()
                     await update.message.reply_text(
-                        "Please select your gender:", reply_markup=gender_keyboard
+                        "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
+                        reply_markup=user_keyboard,
                     )
-                elif db_step == "country":
-                    await update.message.reply_text(
-                        "Please enter your country:", reply_markup=ReplyKeyboardRemove()
-                    )
-                elif db_step == "age":
-                    await update.message.reply_text("Please enter your age:")
-                # Now fall through so if the current message IS the answer, it gets processed
+                    # Handle referral
+                    try:
+                        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
+                        referrer = ref_row["referred_by"] if ref_row else None
+                        if referrer:
+                            vip_granted = await handle_referral(uid, referrer)
+                            if vip_granted:
+                                try:
+                                    await context.bot.send_message(
+                                        referrer,
+                                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error("Referral error for %s: %s", uid, e)
+                else:
+                    await update.message.reply_text("Please enter a valid age (5–120):")
+                return
+
+            # Fallback — unknown step, restart from name
+            context.user_data["step"] = "name"
+            await update.message.reply_text("Please enter your name to continue:")
+            return
+
+        elif not await user_exists(uid):
+            # User has no row at all — tell them to /start
+            await update.message.reply_text(
+                "Please send /start to begin.", reply_markup=ReplyKeyboardRemove()
+            )
+            return
 
     step = context.user_data.get("step")
 
-    # ── REGISTRATION FLOW ──
-    # Only intercept text messages during registration.
-    # Media (photos, stickers, voice) is ignored here and falls to relay.
-
-    if step == "name":
-        if not text or text in BUTTON_TEXTS:
-            await update.message.reply_text("Please enter your name:")
-            return
-        await db_pool.execute("UPDATE users SET name=$1 WHERE user_id=$2", text, uid)
-        context.user_data["step"] = "gender"
-        await update.message.reply_text(
-            "Select your gender:", reply_markup=gender_keyboard
-        )
-        return
-
-    if step == "gender":
-        if text not in ("Male", "Female"):
-            await update.message.reply_text(
-                "Please select your gender using the buttons.",
-                reply_markup=gender_keyboard,
-            )
-            return
-        await db_pool.execute("UPDATE users SET gender=$1 WHERE user_id=$2", text, uid)
-        context.user_data["step"] = "country"
-        await update.message.reply_text(
-            "Enter your country:", reply_markup=ReplyKeyboardRemove()
-        )
-        return
-
-    if step == "country":
-        if not text or text in BUTTON_TEXTS:
-            await update.message.reply_text("Please enter your country:")
-            return
-        await db_pool.execute("UPDATE users SET country=$1 WHERE user_id=$2", text, uid)
-        context.user_data["step"] = "age"
-        await update.message.reply_text("Enter your age:")
-        return
-
-    if step == "age":
-        if not text.isdigit() or not (5 <= int(text) <= 120):
-            await update.message.reply_text("Please enter a valid age (5–120).")
-            return
-        try:
-            await db_pool.execute("UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid)
-        except Exception as e:
-            logger.error("Failed to save age for %s: %s", uid, e)
-            await update.message.reply_text("Something went wrong. Please try again.")
-            return
-
-        context.user_data.clear()  # wipe step and any stale state
-
-        # Send completion message FIRST — guaranteed keyboard delivery
-        await update.message.reply_text(
-            "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
-            reply_markup=user_keyboard,
-        )
-
-        # Referral in background — doesn't block keyboard delivery
-        try:
-            ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
-            referrer = ref_row["referred_by"] if ref_row else None
-            if referrer:
-                vip_granted = await handle_referral(uid, referrer)
-                if vip_granted:
-                    try:
-                        await context.bot.send_message(
-                            referrer,
-                            f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
-                        )
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.error("Referral processing error for %s: %s", uid, e)
-        return
+    # Registration handled in gate above
 
     # ── ADMIN PANEL ENTRY ──
 
