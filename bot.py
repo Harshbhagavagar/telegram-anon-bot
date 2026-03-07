@@ -191,23 +191,20 @@ async def get_partner(uid: int):
 
 
 async def check_vip(uid: int) -> bool:
+    # Let PostgreSQL do the time comparison — avoids any Python/DB timezone mismatch
     row = await db_pool.fetchrow(
-        "SELECT is_vip, vip_expiry FROM users WHERE user_id = $1", uid
+        """
+        SELECT
+            CASE
+                WHEN is_vip = TRUE AND vip_expiry IS NULL THEN TRUE
+                WHEN vip_expiry > NOW() THEN TRUE
+                ELSE FALSE
+            END AS active
+        FROM users WHERE user_id = $1
+        """,
+        uid,
     )
-    if not row:
-        return False
-    # Permanent VIP: is_vip=TRUE with no expiry (admin/manually granted)
-    if row["is_vip"] and row["vip_expiry"] is None:
-        return True
-    # Timed VIP: expiry exists and is in the future
-    if row["vip_expiry"] and row["vip_expiry"] > datetime.now(timezone.utc):
-        return True
-    # Expired — clean up is_vip flag so DB stays consistent
-    if row["is_vip"] and row["vip_expiry"] and row["vip_expiry"] <= datetime.now(timezone.utc):
-        await db_pool.execute(
-            "UPDATE users SET is_vip=FALSE WHERE user_id=$1", uid
-        )
-    return False
+    return bool(row and row["active"])
 
 
 async def grant_vip(uid: int, days: int):
