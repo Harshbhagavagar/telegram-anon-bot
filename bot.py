@@ -211,16 +211,16 @@ async def check_vip(uid: int) -> bool:
 
 
 async def grant_vip(uid: int, days: int):
-    # Cast to text then interval — most reliable with asyncpg positional params
+    # Bake days directly into SQL string — avoids all asyncpg interval casting issues
     await db_pool.execute(
-        """
+        f"""
         UPDATE users
         SET is_vip     = TRUE,
             vip_expiry = GREATEST(NOW(), COALESCE(vip_expiry, NOW()))
-                         + ($1 * INTERVAL '1 day')
-        WHERE user_id  = $2
+                         + INTERVAL '{days} days'
+        WHERE user_id  = $1
         """,
-        days, uid,
+        uid,
     )
 
 
@@ -406,6 +406,99 @@ async def cleanup_null_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await db_pool.execute("DELETE FROM users WHERE user_id = $1", uid)
     await update.message.reply_text(f"🗑 Removed {count} incomplete user(s) (missing name or gender).")
+
+# ================= REGRANT EXPIRED VIP =================
+
+async def regrant_vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /regrantvip — re-grants VIP to all users who earned it via referrals
+    but whose VIP has already expired. Run once after increasing VIP_REFERRAL_DAYS.
+    """
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    # Find users who earned at least 1 VIP cycle but VIP is now expired or inactive
+    rows = await db_pool.fetch(
+        """
+        SELECT user_id, name, referral_count
+        FROM users
+        WHERE referral_count >= $1
+          AND (is_vip = FALSE OR vip_expiry < NOW())
+          AND user_id != $2
+        """,
+        VIP_REFERRAL_THRESHOLD, ADMIN_ID
+    )
+    if not rows:
+        await update.message.reply_text("✅ No users need VIP re-grant.")
+        return
+    count = 0
+    for row in rows:
+        cycles = row["referral_count"] // VIP_REFERRAL_THRESHOLD
+        total_days = cycles * VIP_REFERRAL_DAYS
+        await db_pool.execute(
+            """
+            UPDATE users
+            SET is_vip = TRUE,
+                vip_expiry = NOW() + INTERVAL '3 days'
+            WHERE user_id = $2
+            """,
+            total_days, row["user_id"]
+        )
+        try:
+            await context.bot.send_message(
+                row["user_id"],
+                f"🎉 Your 👑 VIP has been renewed for {total_days} days!"
+            )
+        except Exception:
+            pass
+        count += 1
+    await update.message.reply_text(
+        f"✅ Re-granted VIP to {count} user(s)."
+    )
+
+# ================= FIX VIP =================
+
+async def fixvip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /fixvip — admin only.
+    Scans all users with enough referrals but inactive VIP and grants it.
+    Fixes users affected by the old interval bug.
+    """
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    rows = await db_pool.fetch(
+        """
+        SELECT user_id, name, referral_count
+        FROM users
+        WHERE referral_count >= $1
+          AND is_vip = FALSE
+          AND user_id != $2
+        """,
+        VIP_REFERRAL_THRESHOLD, ADMIN_ID,
+    )
+
+    if not rows:
+        await update.message.reply_text("✅ No users need VIP fixing.")
+        return
+
+    fixed = 0
+    for row in rows:
+        uid   = row["user_id"]
+        # Grant VIP cycles they've earned
+        cycles = row["referral_count"] // VIP_REFERRAL_THRESHOLD
+        total_days = cycles * VIP_REFERRAL_DAYS
+        await grant_vip(uid, total_days)
+        fixed += 1
+        try:
+            await context.bot.send_message(
+                uid, f"🎉 Your 👑 VIP has been activated for {total_days} days!"
+            )
+        except Exception:
+            pass
+
+    await update.message.reply_text(
+        f"✅ Fixed VIP for {fixed} user(s)."
+    )
 
 # ================= DEBUG REFERRAL =================
 
@@ -918,17 +1011,42 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=vip_keyboard,
             )
             return
+        row = await db_pool.fetchrow(
+            "SELECT is_vip, vip_expiry, referral_count FROM users WHERE user_id=$1", uid
+        )
         is_active = await check_vip(uid)
-        status    = "✅ Active" if is_active else "❌ Inactive"
+        count     = row["referral_count"] if row else 0
+        cycle_progress = count % VIP_REFERRAL_THRESHOLD
+        remaining      = VIP_REFERRAL_THRESHOLD - cycle_progress
+
         if is_active:
-            row = await db_pool.fetchrow("SELECT vip_expiry FROM users WHERE user_id=$1", uid)
             expiry_str = (
-                row["vip_expiry"].strftime("%Y-%m-%d %H:%M UTC")
+                row["vip_expiry"].strftime("%d %b %Y, %H:%M UTC")
                 if row and row["vip_expiry"] else "Permanent ♾️"
             )
-            msg = f"👑 VIP Status: {status}\nExpires: {expiry_str}"
+            msg = (
+                f"👑 VIP Status: ✅ Active\n"
+                f"Expires: {expiry_str}\n\n"
+                f"🔄 Next VIP in {remaining} more referral(s)"
+            )
         else:
-            msg = f"👑 VIP Status: {status}\n\nVIP lets you filter partners by gender."
+            # Check if they previously had VIP (expired)
+            had_vip = row and row["vip_expiry"] is not None
+            if had_vip:
+                expired_str = row["vip_expiry"].strftime("%d %b %Y")
+                msg = (
+                    f"👑 VIP Status: ⏰ Expired\n"
+                    f"Expired on: {expired_str}\n\n"
+                    f"Invite {remaining} more friend(s) to unlock\n"
+                    f"👑 VIP for {VIP_REFERRAL_DAYS} days again!"
+                )
+            else:
+                msg = (
+                    f"👑 VIP Status: ❌ Inactive\n\n"
+                    f"Invite {VIP_REFERRAL_THRESHOLD} friends to get\n"
+                    f"👑 VIP for {VIP_REFERRAL_DAYS} days!\n\n"
+                    f"Progress: {cycle_progress}/{VIP_REFERRAL_THRESHOLD}"
+                )
         await update.message.reply_text(msg, reply_markup=vip_keyboard)
         return
 
@@ -1079,7 +1197,9 @@ async def main():
     app.add_handler(CommandHandler("unban",      handle_ban))
     app.add_handler(CommandHandler("cleanchats", cleanchats_command))
     app.add_handler(CommandHandler("debugref",   debug_referral))
+    app.add_handler(CommandHandler("regrantvip", regrant_vip_command))
     app.add_handler(CommandHandler("cleanup",    cleanup_null_users))
+    app.add_handler(CommandHandler("fixvip",     fixvip_command))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
 
