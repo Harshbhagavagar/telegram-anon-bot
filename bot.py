@@ -786,6 +786,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await db_pool.execute("UPDATE users SET gender=$1 WHERE user_id=$2", text, uid)
                     context.user_data["step"] = "country"
                     await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
+
+                    # ── REFERRAL TRIGGER ──
+                    # Fire here — user is now fully registered (name+gender done).
+                    # is_registered() returns True from this point forward.
+                    try:
+                        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
+                        referrer = ref_row["referred_by"] if ref_row else None
+                        if referrer:
+                            vip_granted = await handle_referral(uid, referrer)
+                            if vip_granted:
+                                try:
+                                    await context.bot.send_message(
+                                        referrer,
+                                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error("Referral error for %s: %s", uid, e)
                 else:
                     await update.message.reply_text("Please select your gender:", reply_markup=gender_keyboard)
                 return
@@ -812,22 +831,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
                         reply_markup=user_keyboard,
                     )
-                    # Handle referral
-                    try:
-                        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
-                        referrer = ref_row["referred_by"] if ref_row else None
-                        if referrer:
-                            vip_granted = await handle_referral(uid, referrer)
-                            if vip_granted:
-                                try:
-                                    await context.bot.send_message(
-                                        referrer,
-                                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
-                                    )
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        logger.error("Referral error for %s: %s", uid, e)
+                    # Referral handled at gender step
                 else:
                     await update.message.reply_text("Please enter a valid age (5–120):")
                 return
