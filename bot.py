@@ -91,9 +91,17 @@ async def init_db():
     await db_pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports (reported_id)"
     )
-    await db_pool.execute(
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"
-    )
+    # Safe migrations — add any columns that may be missing from older deployments
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned      BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS age            INT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS country        TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by    BIGINT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INT DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expiry     TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_messages INT DEFAULT 0",
+    ]:
+        await db_pool.execute(col_sql)
     logger.info("Database initialised successfully")
 
 # ================= KEYBOARDS =================
@@ -162,8 +170,9 @@ async def user_exists(uid: int) -> bool:
 
 
 async def is_registered(uid: int) -> bool:
+    # name + gender are the minimum required fields to use the bot
     row = await db_pool.fetchrow(
-        "SELECT 1 FROM users WHERE user_id = $1 AND name IS NOT NULL AND gender IS NOT NULL AND age IS NOT NULL",
+        "SELECT 1 FROM users WHERE user_id = $1 AND name IS NOT NULL AND gender IS NOT NULL",
         uid,
     )
     return row is not None
@@ -227,14 +236,17 @@ async def handle_referral(new_uid: int, referrer_uid: int) -> bool:
 # ================= REGISTRATION STEP DETECTOR =================
 
 async def get_registration_step(uid: int) -> str | None:
-    """Reads DB to find which step a user is on. Each field is saved immediately."""
+    """Reads DB to find which registration step a user is on.
+    Returns None if fully registered (name + gender present).
+    country and age are collected but not required to use the bot."""
     row = await db_pool.fetchrow(
         "SELECT name, gender, country, age FROM users WHERE user_id = $1", uid
     )
     if not row:
         return None
-    if row["name"]    is None: return "name"
-    if row["gender"]  is None: return "gender"
+    if row["name"]   is None: return "name"
+    if row["gender"] is None: return "gender"
+    # Only ask country/age if they haven't answered yet AND name+gender are done
     if row["country"] is None: return "country"
     if row["age"]     is None: return "age"
     return None
@@ -652,15 +664,17 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── REGISTRATION RECOVERY ──
-    # Silently restore step from DB if context was wiped by restart.
-    # Does NOT return — just sets the step then falls through to the handler.
+    # Only recover from DB if context has NO step set (e.g. after bot restart).
+    # If step is already set in context, trust it — do not overwrite.
     if uid != ADMIN_ID and context.user_data.get("step") is None:
         if await user_exists(uid) and not await is_registered(uid):
             db_step = await get_registration_step(uid)
             if db_step:
                 context.user_data["step"] = db_step
+                logger.info("Recovered step=%s for uid=%s from DB", db_step, uid)
 
     step = context.user_data.get("step")
+    logger.debug("router uid=%s step=%s text=%r", uid, step, text[:20] if text else "")
 
     # ── REGISTRATION FLOW ──
     # Only intercept text messages during registration.
@@ -704,27 +718,37 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit() or not (5 <= int(text) <= 120):
             await update.message.reply_text("Please enter a valid age (5–120).")
             return
-        await db_pool.execute("UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid)
-        context.user_data["step"] = None
+        try:
+            await db_pool.execute("UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid)
+        except Exception as e:
+            logger.error("Failed to save age for %s: %s", uid, e)
+            await update.message.reply_text("Something went wrong. Please try again.")
+            return
 
-        # Referral always from DB — never lost on restart
-        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
-        referrer = ref_row["referred_by"] if ref_row else None
-        if referrer:
-            vip_granted = await handle_referral(uid, referrer)
-            if vip_granted:
-                try:
-                    await context.bot.send_message(
-                        referrer,
-                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
-                    )
-                except Exception:
-                    pass
+        context.user_data.clear()  # wipe step and any stale state
 
+        # Send completion message FIRST — guaranteed keyboard delivery
         await update.message.reply_text(
             "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
             reply_markup=user_keyboard,
         )
+
+        # Referral in background — doesn't block keyboard delivery
+        try:
+            ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
+            referrer = ref_row["referred_by"] if ref_row else None
+            if referrer:
+                vip_granted = await handle_referral(uid, referrer)
+                if vip_granted:
+                    try:
+                        await context.bot.send_message(
+                            referrer,
+                            f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error("Referral processing error for %s: %s", uid, e)
         return
 
     # ── ADMIN PANEL ENTRY ──
