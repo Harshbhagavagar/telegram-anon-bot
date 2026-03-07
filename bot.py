@@ -429,17 +429,9 @@ async def regrant_vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     count = 0
     for row in rows:
-        cycles = row["referral_count"] // VIP_REFERRAL_THRESHOLD
+        cycles     = row["referral_count"] // VIP_REFERRAL_THRESHOLD
         total_days = cycles * VIP_REFERRAL_DAYS
-        await db_pool.execute(
-            """
-            UPDATE users
-            SET is_vip = TRUE,
-                vip_expiry = NOW() + INTERVAL '3 days'
-            WHERE user_id = $2
-            """,
-            total_days, row["user_id"]
-        )
+        await grant_vip(row["user_id"], total_days)
         try:
             await context.bot.send_message(
                 row["user_id"],
@@ -448,9 +440,7 @@ async def regrant_vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
         count += 1
-    await update.message.reply_text(
-        f"✅ Re-granted VIP to {count} user(s)."
-    )
+    await update.message.reply_text(f"✅ Re-granted VIP to {count} user(s).")
 
 # ================= FIX VIP =================
 
@@ -556,6 +546,7 @@ async def match_user(
                       AND (w.preferred_gender IS NULL OR w.preferred_gender = $2)
                       AND w.user_id != $3
                       AND u.is_banned = FALSE
+                      AND u.name IS NOT NULL AND u.gender IS NOT NULL
                     ORDER BY w.queued_at LIMIT 5
                     """,
                     pref, my_gender, uid,
@@ -568,6 +559,7 @@ async def match_user(
                     WHERE w.user_id != $1
                       AND (w.preferred_gender IS NULL OR w.preferred_gender = $2)
                       AND u.is_banned = FALSE
+                      AND u.name IS NOT NULL AND u.gender IS NOT NULL
                     ORDER BY w.queued_at LIMIT 5
                     """,
                     uid, my_gender,
@@ -1074,6 +1066,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("announce_mode", None)
         context.user_data.pop("in_admin_panel", None)
         await update.message.reply_text("Main menu 👇", reply_markup=get_main_keyboard(uid))
+        return
+
+    # ── BLOCK UNREGISTERED USERS FROM BUTTONS/RELAY ──
+    if uid != ADMIN_ID and not await is_registered(uid):
+        await update.message.reply_text(
+            "Please complete your registration first.\n\nSend /start to begin.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return
 
     # ── RELAY MESSAGE / MEDIA TO PARTNER ──
