@@ -5,7 +5,6 @@ import asyncio
 from datetime import datetime, timezone
 
 import asyncpg
-
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -13,6 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from telegram.error import Forbidden, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -40,13 +40,10 @@ MATCH_INVITE_DELAY     = 45
 
 db_pool: asyncpg.Pool = None
 
-# Module-level dict: uid -> last_partner_id
-# Used so the side that received "stranger left" can also report
-_last_chat: dict = {}
-
 # ================= SCHEMA =================
 
 async def init_db():
+    # All timestamps use WITH TIME ZONE — always UTC, no offset surprises
     await db_pool.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id        BIGINT PRIMARY KEY,
@@ -94,7 +91,6 @@ async def init_db():
     await db_pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports (reported_id)"
     )
-    # Safe migrations for existing DBs
     await db_pool.execute(
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"
     )
@@ -150,7 +146,6 @@ gender_keyboard = ReplyKeyboardMarkup(
 )
 
 def report_inline(partner_id: int) -> InlineKeyboardMarkup:
-    """Inline ⚠️ Report button attached under a message."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("⚠️ Report", callback_data=f"report:{partner_id}")
     ]])
@@ -168,7 +163,7 @@ async def user_exists(uid: int) -> bool:
 
 async def is_registered(uid: int) -> bool:
     row = await db_pool.fetchrow(
-        "SELECT 1 FROM users WHERE user_id = $1 AND name IS NOT NULL AND gender IS NOT NULL",
+        "SELECT 1 FROM users WHERE user_id = $1 AND name IS NOT NULL AND gender IS NOT NULL AND age IS NOT NULL",
         uid,
     )
     return row is not None
@@ -192,10 +187,8 @@ async def check_vip(uid: int) -> bool:
     )
     if not row:
         return False
-    # Permanent VIP: is_vip=TRUE, vip_expiry=NULL (set manually in DB)
     if row["is_vip"] and row["vip_expiry"] is None:
         return True
-    # Timed VIP
     if row["vip_expiry"] and row["vip_expiry"] > datetime.now(timezone.utc):
         return True
     return False
@@ -215,21 +208,14 @@ async def grant_vip(uid: int, days: int):
 
 
 async def handle_referral(new_uid: int, referrer_uid: int) -> bool:
-    """
-    Called after new_uid completes full registration.
-    Increments referrer's count. Grants VIP at threshold.
-    Returns True if VIP was just granted.
-    """
     if referrer_uid == new_uid:
         return False
     if not await user_exists(referrer_uid):
         return False
     row = await db_pool.fetchrow(
         """
-        UPDATE users
-        SET referral_count = referral_count + 1
-        WHERE user_id = $1
-        RETURNING referral_count
+        UPDATE users SET referral_count = referral_count + 1
+        WHERE user_id = $1 RETURNING referral_count
         """,
         referrer_uid,
     )
@@ -241,25 +227,25 @@ async def handle_referral(new_uid: int, referrer_uid: int) -> bool:
 # ================= REGISTRATION STEP DETECTOR =================
 
 async def get_registration_step(uid: int) -> str | None:
-    """
-    Reads the DB to determine which registration step a user is on.
-    Used to recover state after a bot restart wipes context.user_data.
-    Returns: 'name' | 'gender' | 'country' | 'age' | None
-    """
+    """Reads DB to find which step a user is on. Each field is saved immediately."""
     row = await db_pool.fetchrow(
         "SELECT name, gender, country, age FROM users WHERE user_id = $1", uid
     )
     if not row:
         return None
-    if row["name"] is None:
-        return "name"
-    if row["gender"] is None:
-        return "gender"
-    if row["country"] is None:
-        return "country"
-    if row["age"] is None:
-        return "age"
-    return None  # fully registered
+    if row["name"]    is None: return "name"
+    if row["gender"]  is None: return "gender"
+    if row["country"] is None: return "country"
+    if row["age"]     is None: return "age"
+    return None
+
+# ================= CANCEL INVITE TIMER =================
+
+def cancel_invite_timer(context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any running invite prompt task for this user."""
+    task: asyncio.Task = context.user_data.pop("invite_task", None)
+    if task and not task.done():
+        task.cancel()
 
 # ================= CLEAN DEAD CHATS =================
 
@@ -294,18 +280,12 @@ async def clean_dead_chats(bot) -> int:
             logger.info("Cleaned dead chat: %s <-> %s", uid, partner)
             if uid_alive:
                 try:
-                    await bot.send_message(
-                        uid,
-                        "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.",
-                    )
+                    await bot.send_message(uid, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
                 except Exception:
                     pass
             if partner_alive:
                 try:
-                    await bot.send_message(
-                        partner,
-                        "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.",
-                    )
+                    await bot.send_message(partner, "⚠️ Your partner disconnected. Press 🚀 Find Partner to start again.")
                 except Exception:
                     pass
 
@@ -356,20 +336,14 @@ async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if is_unban:
-        await db_pool.execute(
-            "UPDATE users SET is_banned = FALSE WHERE user_id = $1", target_uid
-        )
-        await update.message.reply_text(f"✅ User {target_uid} has been unbanned.")
+        await db_pool.execute("UPDATE users SET is_banned = FALSE WHERE user_id = $1", target_uid)
+        await update.message.reply_text(f"✅ User {target_uid} unbanned.")
         try:
-            await context.bot.send_message(
-                target_uid, "✅ Your ban has been lifted. You can use the bot again."
-            )
+            await context.bot.send_message(target_uid, "✅ Your ban has been lifted.")
         except Exception:
             pass
     else:
-        await db_pool.execute(
-            "UPDATE users SET is_banned = TRUE WHERE user_id = $1", target_uid
-        )
+        await db_pool.execute("UPDATE users SET is_banned = TRUE WHERE user_id = $1", target_uid)
         partner = await get_partner(target_uid)
         if partner:
             await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", target_uid)
@@ -379,46 +353,34 @@ async def handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", target_uid)
-        await update.message.reply_text(f"🚫 User {target_uid} has been banned.")
+        await update.message.reply_text(f"🚫 User {target_uid} banned.")
         try:
-            await context.bot.send_message(
-                target_uid, "🚫 You have been banned from this bot."
-            )
+            await context.bot.send_message(target_uid, "🚫 You have been banned.")
         except Exception:
             pass
 
 # ================= CLEANUP NULL USERS =================
 
 async def cleanup_null_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /cleanup — admin only.
-    Deletes all users whose name is still NULL (never completed registration).
-    Also cleans them from waiting_users and active_chats.
-    """
     if update.message.from_user.id != ADMIN_ID:
         return
-
-    # Find all incomplete users
     rows = await db_pool.fetch(
         "SELECT user_id FROM users WHERE name IS NULL AND user_id != $1", ADMIN_ID
     )
     if not rows:
         await update.message.reply_text("✅ No incomplete registrations found.")
         return
-
     count = len(rows)
-    uids  = [r["user_id"] for r in rows]
-
-    for uid in uids:
+    for row in rows:
+        uid = row["user_id"]
         await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", uid)
         await db_pool.execute("DELETE FROM active_chats  WHERE user_id = $1", uid)
         await db_pool.execute("DELETE FROM active_chats  WHERE partner_id = $1", uid)
-        await db_pool.execute("DELETE FROM reports       WHERE reporter_id = $1 OR reported_id = $1", uid)
-        await db_pool.execute("DELETE FROM users         WHERE user_id = $1", uid)
-
-    await update.message.reply_text(
-        f"🗑 Removed {count} incomplete user(s) whose name was NULL."
-    )
+        await db_pool.execute(
+            "DELETE FROM reports WHERE reporter_id = $1 OR reported_id = $1", uid
+        )
+        await db_pool.execute("DELETE FROM users WHERE user_id = $1", uid)
+    await update.message.reply_text(f"🗑 Removed {count} incomplete user(s).")
 
 # ================= DEBUG REFERRAL =================
 
@@ -428,16 +390,15 @@ async def debug_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /debugref <user_id>")
         return
-    target = int(context.args[0])
     row = await db_pool.fetchrow(
         "SELECT user_id, name, gender, country, age, referred_by, referral_count, is_vip, vip_expiry FROM users WHERE user_id = $1",
-        target,
+        int(context.args[0]),
     )
     if not row:
-        await update.message.reply_text(f"User {target} not found.")
+        await update.message.reply_text("User not found.")
         return
     await update.message.reply_text(
-        f"🔍 Debug for {target}\n\n"
+        f"🔍 Debug\n\n"
         f"name:           {row['name']}\n"
         f"gender:         {row['gender']}\n"
         f"country:        {row['country']}\n"
@@ -459,6 +420,9 @@ async def match_user(
         await update.message.reply_text("You are already in a chat. Use ❌ Stop first.")
         return
 
+    # Cancel any previous invite timer before starting a new search
+    cancel_invite_timer(context)
+
     await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", uid)
 
     row       = await db_pool.fetchrow("SELECT gender FROM users WHERE user_id = $1", uid)
@@ -471,29 +435,25 @@ async def match_user(
             if pref:
                 candidates_rows = await conn.fetch(
                     """
-                    SELECT w.user_id
-                    FROM waiting_users w
+                    SELECT w.user_id FROM waiting_users w
                     JOIN users u ON w.user_id = u.user_id
                     WHERE u.gender = $1
                       AND (w.preferred_gender IS NULL OR w.preferred_gender = $2)
                       AND w.user_id != $3
                       AND u.is_banned = FALSE
-                    ORDER BY w.queued_at
-                    LIMIT 5
+                    ORDER BY w.queued_at LIMIT 5
                     """,
                     pref, my_gender, uid,
                 )
             else:
                 candidates_rows = await conn.fetch(
                     """
-                    SELECT w.user_id
-                    FROM waiting_users w
+                    SELECT w.user_id FROM waiting_users w
                     JOIN users u ON w.user_id = u.user_id
                     WHERE w.user_id != $1
                       AND (w.preferred_gender IS NULL OR w.preferred_gender = $2)
                       AND u.is_banned = FALSE
-                    ORDER BY w.queued_at
-                    LIMIT 5
+                    ORDER BY w.queued_at LIMIT 5
                     """,
                     uid, my_gender,
                 )
@@ -512,9 +472,7 @@ async def match_user(
                 )
                 if not still_waiting:
                     continue
-                await conn.execute(
-                    "DELETE FROM waiting_users WHERE user_id = $1", candidate
-                )
+                await conn.execute("DELETE FROM waiting_users WHERE user_id = $1", candidate)
                 await conn.execute(
                     "INSERT INTO active_chats VALUES ($1,$2) ON CONFLICT (user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id",
                     uid, candidate,
@@ -527,7 +485,8 @@ async def match_user(
                 break
 
     if partner:
-        context.user_data["invite_timer"] = False
+        # Cancel invite timers for both sides
+        cancel_invite_timer(context)
         await context.bot.send_message(uid,     "✅ Connected! Say hi 👋")
         await context.bot.send_message(partner, "✅ Connected! Say hi 👋")
     else:
@@ -546,10 +505,9 @@ async def match_user(
         else:
             await update.message.reply_text("🔎 Searching for a partner...")
 
-        if not context.user_data.get("invite_timer"):
-            context.user_data["invite_timer"] = True
-
-            async def invite_prompt():
+        # FIX: Store task handle so it can be cancelled on stop/match
+        async def invite_prompt():
+            try:
                 await asyncio.sleep(MATCH_INVITE_DELAY)
                 row = await db_pool.fetchrow(
                     "SELECT 1 FROM waiting_users WHERE user_id = $1", uid
@@ -563,9 +521,13 @@ async def match_user(
                         f"👑 VIP for {VIP_REFERRAL_DAYS} days!\n\n"
                         f"Your invite link:\n{link}",
                     )
-                context.user_data["invite_timer"] = False
+            except asyncio.CancelledError:
+                pass  # Task was cancelled cleanly — do nothing
+            finally:
+                context.user_data.pop("invite_task", None)
 
-            asyncio.create_task(invite_prompt())
+        task = asyncio.create_task(invite_prompt())
+        context.user_data["invite_task"] = task
 
 # ================= STOP =================
 
@@ -573,7 +535,9 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     uid = update.message.from_user.id
 
     await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", uid)
-    context.user_data["invite_timer"] = False
+
+    # Always cancel invite timer on stop
+    cancel_invite_timer(context)
 
     partner = await get_partner(uid)
 
@@ -586,11 +550,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", uid)
     await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", partner)
 
-    # Store for report button
-    _last_chat[uid]      = partner
-    _last_chat[partner]  = uid
-
-    # Tell the user who pressed Stop — inline Report button on the message
+    # partner_id is embedded in the inline button callback_data — no dict needed
     await update.message.reply_text(
         "❌ Chat ended.", reply_markup=get_main_keyboard(uid)
     )
@@ -598,16 +558,13 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         "Did something go wrong?", reply_markup=report_inline(partner)
     )
 
-    # Tell the other side
     try:
         await context.bot.send_message(
-            partner,
-            "👋 Stranger left the chat.",
+            partner, "👋 Stranger left the chat.",
             reply_markup=get_main_keyboard(partner),
         )
         await context.bot.send_message(
-            partner,
-            "Did something go wrong?",
+            partner, "Did something go wrong?",
             reply_markup=report_inline(uid),
         )
     except Exception:
@@ -618,8 +575,8 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 # ================= REPORT CALLBACK =================
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query  = update.callback_query
-    uid    = query.from_user.id
+    query = update.callback_query
+    uid   = query.from_user.id
     await query.answer()
 
     try:
@@ -628,23 +585,20 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Invalid report.")
         return
 
-    # 1-hour duplicate guard
     existing = await db_pool.fetchrow(
         """
         SELECT 1 FROM reports
-        WHERE reporter_id = $1
-          AND reported_id = $2
-          AND created_at  > NOW() - INTERVAL '1 hour'
+        WHERE reporter_id = $1 AND reported_id = $2
+          AND created_at > NOW() - INTERVAL '1 hour'
         """,
         uid, partner,
     )
     if existing:
-        await query.edit_message_text("You have already reported this user recently.")
+        await query.edit_message_text("You already reported this user recently.")
         return
 
     await db_pool.execute(
-        "INSERT INTO reports (reporter_id, reported_id) VALUES ($1, $2)",
-        uid, partner,
+        "INSERT INTO reports (reporter_id, reported_id) VALUES ($1, $2)", uid, partner
     )
     report_count = await db_pool.fetchval(
         "SELECT COUNT(*) FROM reports WHERE reported_id = $1", partner
@@ -663,14 +617,14 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Reported ID:  {partner}\n"
             f"Name:         {name}\n"
             f"Username:     @{username}\n"
-            f"Total reports on this user: {report_count}\n\n"
+            f"Total reports: {report_count}\n\n"
             f"To ban: /ban {partner}",
         )
     except Exception:
         pass
 
     await query.edit_message_text(
-        "✅ Report submitted. Thank you for keeping the community safe.\n\nThe admin has been notified."
+        "✅ Report submitted. The admin has been notified."
     )
 
 # ================= ROUTER =================
@@ -690,55 +644,33 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     uid  = update.message.from_user.id
+    # FIX: only use text for registration/button logic — media still relays fine
     text = update.message.text or ""
 
-    # Block banned users
     if await is_banned(uid):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
 
-    # Skip registration check for admin
-    if uid != ADMIN_ID:
-        # ── REGISTRATION RECOVERY FIX ──
-        # If context.user_data was wiped (bot restart), detect step from DB state.
-        # This ensures users mid-registration are never stuck.
-        step = context.user_data.get("step")
-        if step is None and await user_exists(uid) and not await is_registered(uid):
-            step = await get_registration_step(uid)
-            if step:
-                context.user_data["step"] = step
-                # Each field is saved to DB immediately, so we can safely resume
-                if step == "name":
-                    await update.message.reply_text(
-                        "Let's finish your profile.\n\nEnter your name:"
-                    )
-                    return
-                elif step == "gender":
-                    await update.message.reply_text(
-                        "Select your gender:", reply_markup=gender_keyboard
-                    )
-                    return
-                elif step == "country":
-                    await update.message.reply_text(
-                        "Enter your country:", reply_markup=ReplyKeyboardRemove()
-                    )
-                    return
-                elif step == "age":
-                    await update.message.reply_text("Enter your age:")
-                    return
-
-    # -------- REGISTRATION FLOW --------
+    # ── REGISTRATION RECOVERY ──
+    # Silently restore step from DB if context was wiped by restart.
+    # Does NOT return — just sets the step then falls through to the handler.
+    if uid != ADMIN_ID and context.user_data.get("step") is None:
+        if await user_exists(uid) and not await is_registered(uid):
+            db_step = await get_registration_step(uid)
+            if db_step:
+                context.user_data["step"] = db_step
 
     step = context.user_data.get("step")
+
+    # ── REGISTRATION FLOW ──
+    # Only intercept text messages during registration.
+    # Media (photos, stickers, voice) is ignored here and falls to relay.
 
     if step == "name":
         if not text or text in BUTTON_TEXTS:
             await update.message.reply_text("Please enter your name:")
             return
-        # Save name to DB immediately — survives bot restart
-        await db_pool.execute(
-            "UPDATE users SET name=$1 WHERE user_id=$2", text, uid
-        )
+        await db_pool.execute("UPDATE users SET name=$1 WHERE user_id=$2", text, uid)
         context.user_data["step"] = "gender"
         await update.message.reply_text(
             "Select your gender:", reply_markup=gender_keyboard
@@ -752,14 +684,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=gender_keyboard,
             )
             return
-        # Save gender to DB immediately
-        await db_pool.execute(
-            "UPDATE users SET gender=$1 WHERE user_id=$2", text, uid
-        )
+        await db_pool.execute("UPDATE users SET gender=$1 WHERE user_id=$2", text, uid)
         context.user_data["step"] = "country"
         await update.message.reply_text(
-            "Enter your country:",
-            reply_markup=ReplyKeyboardRemove(),
+            "Enter your country:", reply_markup=ReplyKeyboardRemove()
         )
         return
 
@@ -767,29 +695,20 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text or text in BUTTON_TEXTS:
             await update.message.reply_text("Please enter your country:")
             return
-        # Save country to DB immediately
-        await db_pool.execute(
-            "UPDATE users SET country=$1 WHERE user_id=$2", text, uid
-        )
+        await db_pool.execute("UPDATE users SET country=$1 WHERE user_id=$2", text, uid)
         context.user_data["step"] = "age"
         await update.message.reply_text("Enter your age:")
         return
 
     if step == "age":
         if not text.isdigit() or not (5 <= int(text) <= 120):
-            await update.message.reply_text("Please enter a valid age (5-120).")
+            await update.message.reply_text("Please enter a valid age (5–120).")
             return
-
-        # Save age to DB — registration now complete
-        await db_pool.execute(
-            "UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid
-        )
+        await db_pool.execute("UPDATE users SET age=$1 WHERE user_id=$2", int(text), uid)
         context.user_data["step"] = None
 
-        # ── REFERRAL: always read from DB, never from context ──
-        ref_row  = await db_pool.fetchrow(
-            "SELECT referred_by FROM users WHERE user_id = $1", uid
-        )
+        # Referral always from DB — never lost on restart
+        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
         referrer = ref_row["referred_by"] if ref_row else None
         if referrer:
             vip_granted = await handle_referral(uid, referrer)
@@ -803,18 +722,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
         await update.message.reply_text(
-            "Registration complete 🎉", reply_markup=user_keyboard
+            "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
+            reply_markup=user_keyboard,
         )
         return
 
-    # -------- ADMIN PANEL BUTTON --------
+    # ── ADMIN PANEL ENTRY ──
 
     if text == "⚙️ Admin Panel" and uid == ADMIN_ID:
         context.user_data["in_admin_panel"] = True
         await update.message.reply_text("⚙️ Admin Panel", reply_markup=admin_panel_keyboard)
         return
 
-    # -------- ADMIN PANEL ACTIONS --------
+    # ── ADMIN PANEL ACTIONS ──
 
     if uid == ADMIN_ID and context.user_data.get("in_admin_panel"):
 
@@ -823,11 +743,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active    = (await db_pool.fetchval("SELECT COUNT(*) FROM active_chats") or 0) // 2
             waiting   = await db_pool.fetchval("SELECT COUNT(*) FROM waiting_users")
             vip_count = await db_pool.fetchval(
-                "SELECT COUNT(*) FROM users WHERE (is_vip = TRUE AND vip_expiry IS NULL) OR vip_expiry > NOW()"
+                "SELECT COUNT(*) FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry > NOW()"
             )
-            banned  = await db_pool.fetchval(
-                "SELECT COUNT(*) FROM users WHERE is_banned = TRUE"
-            )
+            banned  = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE is_banned=TRUE")
             reports = await db_pool.fetchval("SELECT COUNT(*) FROM reports")
             await update.message.reply_text(
                 f"📊 Analytics\n\n"
@@ -878,7 +796,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(0.05)
                 except Exception:
                     pass
-            await update.message.reply_text(f"📢 Announcement sent to {sent} users.")
+            await update.message.reply_text(f"📢 Sent to {sent} users.")
             return
 
         if text == "⬅ Back":
@@ -887,7 +805,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Main menu", reply_markup=admin_main_keyboard)
             return
 
-    # -------- SHARED BUTTONS (admin + users) --------
+    # ── SHARED BUTTONS ──
 
     if text == "🚀 Find Partner":
         await match_user(update, context)
@@ -924,13 +842,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_active = await check_vip(uid)
         status    = "✅ Active" if is_active else "❌ Inactive"
         if is_active:
-            row = await db_pool.fetchrow(
-                "SELECT vip_expiry FROM users WHERE user_id = $1", uid
-            )
+            row = await db_pool.fetchrow("SELECT vip_expiry FROM users WHERE user_id=$1", uid)
             expiry_str = (
                 row["vip_expiry"].strftime("%Y-%m-%d %H:%M UTC")
-                if row and row["vip_expiry"]
-                else "Permanent ♾️"
+                if row and row["vip_expiry"] else "Permanent ♾️"
             )
             msg = f"👑 VIP Status: {status}\nExpires: {expiry_str}"
         else:
@@ -940,7 +855,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🎁 Get FREE VIP":
         row            = await db_pool.fetchrow(
-            "SELECT referral_count FROM users WHERE user_id = $1", uid
+            "SELECT referral_count FROM users WHERE user_id=$1", uid
         )
         count          = row["referral_count"] if row else 0
         link           = f"https://t.me/{context.bot.username}?start={uid}"
@@ -952,9 +867,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Your invite link:\n{link}\n\n"
             f"📊 Total referrals: {count}\n"
             f"🔄 Progress: {cycle_progress}/{VIP_REFERRAL_THRESHOLD}\n"
-            f"🏆 VIPs earned so far: {total_vips}\n\n"
-            f"Invite {remaining} more friend(s) to unlock "
-            f"👑 VIP for {VIP_REFERRAL_DAYS} days!"
+            f"🏆 VIPs earned: {total_vips}\n\n"
+            f"Invite {remaining} more to unlock 👑 VIP for {VIP_REFERRAL_DAYS} days!"
         )
         return
 
@@ -967,23 +881,33 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Main menu", reply_markup=get_main_keyboard(uid))
         return
 
-    # -------- RELAY MESSAGE TO PARTNER --------
+    # ── RELAY MESSAGE / MEDIA TO PARTNER ──
+    # Handles text, photos, stickers, voice, video, documents — everything
 
     if text not in BUTTON_TEXTS:
         partner = await get_partner(uid)
         if partner:
             try:
                 await update.message.copy(chat_id=partner)
-                await db_pool.execute(
-                    "UPDATE users SET total_messages = total_messages + 1 WHERE user_id = $1",
-                    uid,
+                if text:  # only count text messages
+                    await db_pool.execute(
+                        "UPDATE users SET total_messages=total_messages+1 WHERE user_id=$1", uid
+                    )
+            except Forbidden:
+                # Partner blocked the bot — end chat definitively
+                logger.warning("Partner %s blocked the bot, ending chat", partner)
+                await db_pool.execute("DELETE FROM active_chats WHERE user_id=$1", uid)
+                await db_pool.execute("DELETE FROM active_chats WHERE user_id=$1", partner)
+                await update.message.reply_text(
+                    "⚠️ Partner is unavailable.", reply_markup=get_main_keyboard(uid)
                 )
-            except Exception:
-                logger.warning("Partner %s unreachable, ending chat", partner)
-                await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", uid)
-                await db_pool.execute(
-                    "DELETE FROM active_chats WHERE user_id = $1", partner
-                )
+            except TimedOut:
+                # Temporary network issue — do NOT end the chat
+                logger.warning("Timeout relaying to partner %s, ignoring", partner)
+            except Exception as e:
+                logger.warning("Relay error to %s: %s", partner, e)
+                await db_pool.execute("DELETE FROM active_chats WHERE user_id=$1", uid)
+                await db_pool.execute("DELETE FROM active_chats WHERE user_id=$1", partner)
                 await update.message.reply_text(
                     "⚠️ Partner disconnected.", reply_markup=get_main_keyboard(uid)
                 )
@@ -1018,34 +942,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """,
             uid, username,
         )
-        await db_pool.execute("DELETE FROM active_chats WHERE user_id = $1", uid)
-        await db_pool.execute("DELETE FROM waiting_users WHERE user_id = $1", uid)
+        await db_pool.execute("DELETE FROM active_chats WHERE user_id=$1", uid)
+        await db_pool.execute("DELETE FROM waiting_users WHERE user_id=$1", uid)
         context.user_data.clear()
         await update.message.reply_text("Welcome, Admin 👋", reply_markup=admin_main_keyboard)
         return
 
-    # Returning user — check if they still need to finish registration
     if await user_exists(uid):
         if not await is_registered(uid):
-            # Restart registration cleanly from name
             context.user_data.clear()
             context.user_data["step"] = "name"
             await update.message.reply_text(
-                "Let's finish setting up your profile.\n\nEnter your name:"
+                "Let's finish your profile.\n\nEnter your name:"
             )
         else:
-            await update.message.reply_text(
-                "Welcome back! 👋", reply_markup=user_keyboard
-            )
+            await update.message.reply_text("Welcome back! 👋", reply_markup=user_keyboard)
         return
 
-    # Brand new user
-    # referred_by stored immediately so it survives bot restarts
+    # New user — save referred_by to DB immediately
     await db_pool.execute(
-        "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        "INSERT INTO users (user_id, username, referred_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
         uid, username, ref,
     )
-
     context.user_data.clear()
     context.user_data["step"] = "name"
     await update.message.reply_text(
@@ -1072,7 +990,7 @@ async def main():
     app.add_handler(CommandHandler("unban",      handle_ban))
     app.add_handler(CommandHandler("cleanchats", cleanchats_command))
     app.add_handler(CommandHandler("debugref",   debug_referral))
-    app.add_handler(CommandHandler("cleanup",     cleanup_null_users))
+    app.add_handler(CommandHandler("cleanup",    cleanup_null_users))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
 
@@ -1080,7 +998,15 @@ async def main():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    await asyncio.Event().wait()
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        # Graceful shutdown — always close the pool
+        logger.info("Shutting down, closing DB pool...")
+        await db_pool.close()
+        await app.stop()
+        await app.shutdown()
 
 
 if __name__ == "__main__":
