@@ -170,9 +170,14 @@ async def user_exists(uid: int) -> bool:
 
 
 async def is_registered(uid: int) -> bool:
-    # name + gender are the minimum required fields to use the bot
+    # ALL 4 fields required — gate stays closed until name+gender+country+age are all saved
     row = await db_pool.fetchrow(
-        "SELECT 1 FROM users WHERE user_id = $1 AND name IS NOT NULL AND gender IS NOT NULL",
+        """SELECT 1 FROM users
+           WHERE user_id = $1
+             AND name    IS NOT NULL
+             AND gender  IS NOT NULL
+             AND country IS NOT NULL
+             AND age     IS NOT NULL""",
         uid,
     )
     return row is not None
@@ -787,24 +792,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data["step"] = "country"
                     await update.message.reply_text("Enter your country:", reply_markup=ReplyKeyboardRemove())
 
-                    # ── REFERRAL TRIGGER ──
-                    # Fire here — user is now fully registered (name+gender done).
-                    # is_registered() returns True from this point forward.
-                    try:
-                        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
-                        referrer = ref_row["referred_by"] if ref_row else None
-                        if referrer:
-                            vip_granted = await handle_referral(uid, referrer)
-                            if vip_granted:
-                                try:
-                                    await context.bot.send_message(
-                                        referrer,
-                                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
-                                    )
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        logger.error("Referral error for %s: %s", uid, e)
+                    # Referral triggered after age (all fields saved)
                 else:
                     await update.message.reply_text("Please select your gender:", reply_markup=gender_keyboard)
                 return
@@ -831,7 +819,23 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Registration complete 🎉\n\nUse the buttons below to find a chat partner!",
                         reply_markup=user_keyboard,
                     )
-                    # Referral handled at gender step
+                    # ── REFERRAL TRIGGER ──
+                    # All 4 fields now saved. Fire referral exactly once.
+                    try:
+                        ref_row  = await db_pool.fetchrow("SELECT referred_by FROM users WHERE user_id=$1", uid)
+                        referrer = ref_row["referred_by"] if ref_row else None
+                        if referrer:
+                            vip_granted = await handle_referral(uid, referrer)
+                            if vip_granted:
+                                try:
+                                    await context.bot.send_message(
+                                        referrer,
+                                        f"🎉 You earned {VIP_REFERRAL_DAYS} days of 👑 VIP for inviting friends!",
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error("Referral error for %s: %s", uid, e)
                 else:
                     await update.message.reply_text("Please enter a valid age (5–120):")
                 return
