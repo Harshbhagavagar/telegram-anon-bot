@@ -354,6 +354,50 @@ async def update_command(update, context):
             logger.warning('update nudge failed uid=%s: %s', uid, e)
     await update.message.reply_text(f'\u2705 Sent re-registration prompt to {sent}/{len(rows)} incomplete user(s).')
 
+async def stats_command(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    total      = await db_pool.fetchval('SELECT COUNT(*) FROM users')
+    male       = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Male'")
+    female     = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Female'")
+    incomplete = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE name IS NULL OR gender IS NULL OR country IS NULL OR age IS NULL')
+    active     = (await db_pool.fetchval('SELECT COUNT(*) FROM active_chats') or 0) // 2
+    waiting    = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
+    vips       = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW()")
+    banned     = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE is_banned=TRUE')
+    reports    = await db_pool.fetchval('SELECT COUNT(*) FROM reports')
+    total_msgs = await db_pool.fetchval('SELECT COALESCE(SUM(total_messages),0) FROM users')
+    today      = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '24 hours'")
+    week       = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '7 days'")
+    top_refs   = await db_pool.fetch(
+        'SELECT name, username, referral_count FROM users WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 5')
+
+    male_pct   = round(male/total*100)   if total else 0
+    female_pct = round(female/total*100) if total else 0
+
+    lines = [
+        '\U0001f4ca Full Stats\n',
+        f'\U0001f464 Total users:    {total}',
+        f'\U0001f468 Male:           {male} ({male_pct}%)',
+        f'\U0001f469 Female:         {female} ({female_pct}%)',
+        f'\u2753 Incomplete:     {incomplete}',
+        f'\U0001f4c5 Today:          {today}',
+        f'\U0001f4c6 This week:      {week}',
+        f'\n\U0001f4ac Active chats:  {active}',
+        f'\U0001f50e Waiting:        {waiting}',
+        f'\U0001f4dd Total messages: {total_msgs}',
+        f'\n\U0001f451 VIPs:           {vips}',
+        f'\U0001f6ab Banned:         {banned}',
+        f'\U0001f6a8 Reports:        {reports}',
+    ]
+    if top_refs:
+        lines.append('\n\U0001f3c6 Top Referrers:')
+        for r in top_refs:
+            name = r['name'] or 'Unknown'
+            uname = f"@{r['username']}" if r['username'] else 'no username'
+            lines.append(f"  {name} ({uname}) — {r['referral_count']} refs")
+
+    await update.message.reply_text('\n'.join(lines))
+
 async def debug_referral(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     if not context.args or not context.args[0].isdigit():
@@ -862,6 +906,7 @@ async def main():
     app.add_handler(CommandHandler('regrantvip', regrant_vip_command))
     app.add_handler(CommandHandler('cleanup',    cleanup_null_users))
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
+    app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
     app.add_handler(CallbackQueryHandler(report_callback,             pattern=r'^report:'))
     app.add_handler(CallbackQueryHandler(tod_callback,                pattern=r'^tod_'))
