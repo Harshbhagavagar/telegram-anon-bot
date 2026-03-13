@@ -319,6 +319,41 @@ async def fixvip_command(update, context):
         except: pass
     await update.message.reply_text(f'\u2705 Fixed VIP for {len(rows)} user(s).')
 
+async def update_command(update, context):
+    """Send /start-style re-prompt to all users with NULL name or gender."""
+    if update.message.from_user.id != ADMIN_ID: return
+    rows = await db_pool.fetch(
+        'SELECT user_id FROM users WHERE (name IS NULL OR gender IS NULL OR country IS NULL OR age IS NULL) AND user_id!=$1',
+        ADMIN_ID)
+    if not rows:
+        await update.message.reply_text('\u2705 All users are fully registered.'); return
+    sent = 0
+    for r in rows:
+        uid = r['user_id']
+        step = await get_registration_step(uid)
+        try:
+            if step == 'name':
+                await context.bot.send_message(uid,
+                    '\U0001f44b Hey! Please complete your profile to use the bot.\n\nEnter your name:',
+                    reply_markup=ReplyKeyboardRemove())
+            elif step == 'gender':
+                await context.bot.send_message(uid,
+                    '\U0001f44b Hey! Please complete your profile.\n\nSelect your gender:',
+                    reply_markup=ReplyKeyboardMarkup([['Male','Female']], resize_keyboard=True, one_time_keyboard=True))
+            elif step == 'country':
+                await context.bot.send_message(uid,
+                    '\U0001f44b Hey! Please complete your profile.\n\nEnter your country:',
+                    reply_markup=ReplyKeyboardRemove())
+            elif step == 'age':
+                await context.bot.send_message(uid,
+                    '\U0001f44b Hey! Please complete your profile.\n\nEnter your age:',
+                    reply_markup=ReplyKeyboardRemove())
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning('update nudge failed uid=%s: %s', uid, e)
+    await update.message.reply_text(f'\u2705 Sent re-registration prompt to {sent}/{len(rows)} incomplete user(s).')
+
 async def debug_referral(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     if not context.args or not context.args[0].isdigit():
@@ -494,7 +529,11 @@ async def admin_report_callback(update, context):
     action = (InlineKeyboardButton('\u2705 Unban', callback_data=f'admin_ban:unban:{reported_id}')
               if banned else
               InlineKeyboardButton('\U0001f6ab Ban', callback_data=f'admin_ban:ban:{reported_id}'))
-    markup = InlineKeyboardMarkup([[action, InlineKeyboardButton('\U0001f519 Back', callback_data='admin_back_reports')]])
+    markup = InlineKeyboardMarkup([[
+        action,
+        InlineKeyboardButton('\U0001f5d1 Delete Report', callback_data=f'admin_del_report:{reported_id}'),
+        InlineKeyboardButton('\U0001f519 Back', callback_data='admin_back_reports'),
+    ]])
     await q.edit_message_text(msg, reply_markup=markup)
 
 async def admin_ban_callback(update, context):
@@ -519,6 +558,16 @@ async def admin_ban_callback(update, context):
         try: await context.bot.send_message(tid, '\u2705 Your ban has been lifted.')
         except: pass
         await q.edit_message_text(f'\u2705 User {tid} unbanned.')
+
+async def admin_del_report_callback(update, context):
+    """Delete all reports for a reported user."""
+    q = update.callback_query
+    if q.from_user.id != ADMIN_ID: await q.answer('Not authorized.', show_alert=True); return
+    await q.answer()
+    reported_id = int(q.data.split(':')[1])
+    deleted = await db_pool.fetchval('SELECT COUNT(*) FROM reports WHERE reported_id=$1', reported_id)
+    await db_pool.execute('DELETE FROM reports WHERE reported_id=$1', reported_id)
+    await q.edit_message_text(f'\u2705 Deleted {deleted} report(s) for user {reported_id}.')
 
 async def admin_back_reports_callback(update, context):
     q = update.callback_query
@@ -550,15 +599,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── REGISTRATION GATE ── ALL 4 fields required before anything works
     if uid != ADMIN_ID:
-        if await user_exists(uid) and not await is_registered(uid):
-            if context.user_data.get('step') is None:
-                db_step = await get_registration_step(uid)
-                context.user_data['step'] = db_step or 'name'
-                logger.info('Recovered step=%s uid=%s', context.user_data['step'], uid)
+        # Gate fires if:
+        # (a) user has a row but is incomplete, OR
+        # (b) user has no row yet but has a step in context (mid-registration, no DB row yet)
+        in_registration = context.user_data.get('step') is not None
+        if not in_registration and await user_exists(uid) and not await is_registered(uid):
+            # Bot restarted mid-registration — recover step from DB
+            db_step = await get_registration_step(uid)
+            context.user_data['step'] = db_step or 'name'
+            logger.info('Recovered step=%s uid=%s', context.user_data['step'], uid)
+            in_registration = True
+        if in_registration:
             step = context.user_data.get('step')
             if step == 'name':
                 if text and text not in BUTTON_TEXTS:
-                    await db_pool.execute('UPDATE users SET name=$1 WHERE user_id=$2', text, uid)
+                    ref      = context.user_data.get('ref')
+                    username = context.user_data.get('username') or update.message.from_user.username
+                    await db_pool.execute(
+                        'INSERT INTO users(user_id,username,name,referred_by) VALUES($1,$2,$3,$4) ON CONFLICT(user_id) DO UPDATE SET name=$3',
+                        uid, username, text, ref)
                     context.user_data['step'] = 'gender'
                     await update.message.reply_text('Select your gender:', reply_markup=gender_keyboard)
                 else:
@@ -590,7 +649,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(
                         'Registration complete \U0001f389\n\nUse the buttons below to find a chat partner!',
                         reply_markup=user_keyboard)
-                    # REFERRAL — fires exactly once, all 4 fields now saved
                     try:
                         rr = await db_pool.fetchrow('SELECT referred_by FROM users WHERE user_id=$1', uid)
                         referrer = rr['referred_by'] if rr else None
@@ -603,10 +661,11 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_text('Please enter a valid age (5\u2013120):')
                 return
+            # Unknown step — restart
             context.user_data['step'] = 'name'
             await update.message.reply_text('Please enter your name to continue:')
             return
-        elif not await user_exists(uid):
+        elif not await user_exists(uid) and not context.user_data.get('step'):
             await update.message.reply_text('Please send /start to begin.', reply_markup=ReplyKeyboardRemove())
             return
 
@@ -780,10 +839,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text('Welcome back! \U0001f44b', reply_markup=user_keyboard)
         return
-    await db_pool.execute(
-        'INSERT INTO users(user_id,username,referred_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
-        uid, username, ref)
-    context.user_data.clear(); context.user_data['step'] = 'name'
+    # Don't INSERT yet — store ref in context and only write to DB after all fields collected
+    context.user_data.clear()
+    context.user_data['step']     = 'name'
+    context.user_data['ref']      = ref
+    context.user_data['username'] = username
     await update.message.reply_text('\U0001f44b Welcome! Let\'s set up your profile.\n\nEnter your name:')
 
 async def main():
@@ -802,10 +862,12 @@ async def main():
     app.add_handler(CommandHandler('regrantvip', regrant_vip_command))
     app.add_handler(CommandHandler('cleanup',    cleanup_null_users))
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
+    app.add_handler(CommandHandler('update',     update_command))
     app.add_handler(CallbackQueryHandler(report_callback,             pattern=r'^report:'))
     app.add_handler(CallbackQueryHandler(tod_callback,                pattern=r'^tod_'))
     app.add_handler(CallbackQueryHandler(admin_report_callback,       pattern=r'^admin_report:'))
     app.add_handler(CallbackQueryHandler(admin_ban_callback,          pattern=r'^admin_ban:'))
+    app.add_handler(CallbackQueryHandler(admin_del_report_callback,   pattern=r'^admin_del_report:'))
     app.add_handler(CallbackQueryHandler(admin_back_reports_callback, pattern=r'^admin_back_reports$'))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
     logger.info('Bot started')
