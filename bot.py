@@ -17,6 +17,7 @@ FREE_TOD_LIMIT         = 3
 
 db_pool: asyncpg.Pool = None
 context_tod_counts: dict = {}
+user_last_pref: dict = {}   # uid -> last search preference ('Male', 'Female', or None)
 
 async def init_db():
     await db_pool.execute('''
@@ -427,6 +428,50 @@ async def debug_referral(update, context):
         f"vip:     {r['is_vip']}\nexpiry:  {r['vip_expiry']}")
 
 
+async def _try_match(uid, pref, bot):
+    """Instantly match uid. Returns True if matched."""
+    r = await db_pool.fetchrow('SELECT gender FROM users WHERE user_id=$1', uid)
+    my_gender = r['gender'] if r else None
+    partner = None
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            if pref:
+                crows = await conn.fetch(
+                    'SELECT w.user_id FROM waiting_users w JOIN users u ON w.user_id=u.user_id'
+                    ' WHERE u.gender=$1 AND (w.preferred_gender IS NULL OR w.preferred_gender=$2)'
+                    ' AND w.user_id!=$3 AND u.is_banned=FALSE'
+                    ' AND u.name IS NOT NULL AND u.gender IS NOT NULL'
+                    ' AND u.country IS NOT NULL AND u.age IS NOT NULL'
+                    ' ORDER BY w.queued_at LIMIT 5',
+                    pref, my_gender, uid)
+            else:
+                crows = await conn.fetch(
+                    'SELECT w.user_id FROM waiting_users w JOIN users u ON w.user_id=u.user_id'
+                    ' WHERE w.user_id!=$1 AND (w.preferred_gender IS NULL OR w.preferred_gender=$2)'
+                    ' AND u.is_banned=FALSE'
+                    ' AND u.name IS NOT NULL AND u.gender IS NOT NULL'
+                    ' AND u.country IS NOT NULL AND u.age IS NOT NULL'
+                    ' ORDER BY w.queued_at LIMIT 5',
+                    uid, my_gender)
+            candidates = [row['user_id'] for row in crows]
+            random.shuffle(candidates)
+            for c in candidates:
+                if not await conn.fetchval('SELECT pg_try_advisory_xact_lock($1)', c): continue
+                if not await conn.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', c): continue
+                await conn.execute('DELETE FROM waiting_users WHERE user_id=$1', c)
+                await conn.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
+                await conn.execute('INSERT INTO active_chats VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id', uid, c)
+                await conn.execute('INSERT INTO active_chats VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id', c, uid)
+                partner = c; break
+    if partner:
+        context_tod_counts.pop(uid, None); context_tod_counts.pop(partner, None)
+        await bot.send_message(uid,     '\u2705 Connected! Say hi \U0001f44b')
+        await bot.send_message(partner, '\u2705 Connected! Say hi \U0001f44b')
+        await bot.send_message(uid,     '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(uid))
+        await bot.send_message(partner, '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(partner))
+        return True
+    return False
+
 async def match_user(update, context, pref=None):
     uid = update.message.from_user.id
     if await get_partner(uid):
@@ -473,6 +518,7 @@ async def match_user(update, context, pref=None):
         await context.bot.send_message(uid,     '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(uid))
         await context.bot.send_message(partner, '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(partner))
     else:
+        user_last_pref[uid] = pref   # remember for auto-rematch
         await db_pool.execute(
             'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
             uid, pref)
@@ -506,7 +552,32 @@ async def stop_chat(update, context):
     try:
         await context.bot.send_message(partner, '\U0001f44b Stranger left the chat.', reply_markup=get_main_keyboard(partner))
         await context.bot.send_message(partner, 'Did something go wrong?', reply_markup=report_inline(uid))
-    except: pass
+        # Auto-rematch survivor with their last used preference
+        pref = user_last_pref.get(partner)
+        # VIP check — only use gender pref if still VIP
+        if pref and partner != ADMIN_ID and not await check_vip(partner):
+            pref = None
+        await db_pool.execute(
+            'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
+            partner, pref)
+        user_last_pref[partner] = pref
+        # Try to find an immediate match, otherwise queue silently
+        matched = await _try_match(partner, pref, context.bot)
+        if not matched:
+            label = f'a {pref} partner' if pref else 'a new partner'
+            await context.bot.send_message(partner, f'\U0001f50e Searching for {label} automatically...')
+            async def auto_invite():
+                try:
+                    await asyncio.sleep(MATCH_INVITE_DELAY)
+                    if await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', partner):
+                        link = f'https://t.me/{context.bot.username}?start={partner}'
+                        await context.bot.send_message(partner,
+                            f'\U0001f50e Still searching?\n\nInvite {VIP_REFERRAL_THRESHOLD} friends and unlock '
+                            f'\U0001f451 VIP for {VIP_REFERRAL_DAYS} days!\n\nYour link:\n{link}')
+                except asyncio.CancelledError: pass
+            asyncio.create_task(auto_invite())
+    except Exception as e:
+        logger.warning('Could not notify/rematch partner %s: %s', partner, e)
     return True
 
 
@@ -799,13 +870,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('Main menu', reply_markup=admin_main_keyboard); return
 
     # ── SHARED BUTTONS ──
-    if text == '\U0001f680 Find Partner': await match_user(update, context); return
+    if text == '\U0001f680 Find Partner': user_last_pref[uid] = None; await match_user(update, context); return
     if text == '\U0001f468 Find Male':
-        if uid == ADMIN_ID or await check_vip(uid): await match_user(update, context, 'Male')
+        if uid == ADMIN_ID or await check_vip(uid): user_last_pref[uid] = 'Male'; await match_user(update, context, 'Male')
         else: await update.message.reply_text('\U0001f451 VIP required to filter by gender.\n\nUse \U0001f48e VIP to learn more.')
         return
     if text == '\U0001f469 Find Female':
-        if uid == ADMIN_ID or await check_vip(uid): await match_user(update, context, 'Female')
+        if uid == ADMIN_ID or await check_vip(uid): user_last_pref[uid] = 'Female'; await match_user(update, context, 'Female')
         else: await update.message.reply_text('\U0001f451 VIP required to filter by gender.\n\nUse \U0001f48e VIP to learn more.')
         return
     if text == '\u23ed\ufe0f Next': await stop_chat(update, context); await match_user(update, context); return
