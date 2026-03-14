@@ -547,7 +547,7 @@ async def match_user(update, context, pref=None):
             finally: context.user_data.pop('invite_task', None)
         context.user_data['invite_task'] = asyncio.create_task(invite_prompt())
 
-async def stop_chat(update, context, quitter_auto_search=False):
+async def stop_chat(update, context):
     uid = update.message.from_user.id
     await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
     cancel_invite_timer(context)
@@ -565,59 +565,6 @@ async def stop_chat(update, context, quitter_auto_search=False):
         await context.bot.send_message(partner, 'Did something go wrong?', reply_markup=report_inline(uid))
     except Exception as e:
         logger.warning('Could not notify partner %s: %s', partner, e)
-
-    # ❌ Stop  → quitter_auto_search=False → only PARTNER auto-searches
-    # ⏭ Next  → quitter_auto_search=False → only PARTNER auto-searches (match_user handles quitter)
-    # Both cases: partner always auto-searches, quitter never double-searches
-    targets = [partner]
-    if quitter_auto_search:
-        targets.append(uid)
-
-    for i, target in enumerate(targets):
-        if i > 0: await asyncio.sleep(0.3)  # tiny delay prevents same-pair rematch
-        try:
-            # Read last pref from DB — survives restarts, no memory leak
-            pref_row = await db_pool.fetchrow('SELECT last_search_pref FROM users WHERE user_id=$1', target)
-            pref = pref_row['last_search_pref'] if pref_row else None
-            if pref and target != ADMIN_ID and not await check_vip(target):
-                pref = None
-            label = f'a {pref} partner' if pref else 'a new partner'
-
-            # 5 second window — user can press ❌ Stop to cancel before search starts
-            await context.bot.send_message(target,
-                f'\U0001f504 Searching for {label} in 5 seconds...\n\nPress \u274c Stop to cancel.')
-
-            async def delayed_search(t=target, p=pref, lb=label):
-                try:
-                    await asyncio.sleep(5)
-                    # Check user didn't press Stop during the 5s window
-                    still_free = await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', t)
-                    if not still_free:
-                        # They were removed from queue (pressed Stop) — abort
-                        return
-                    # Also check they didn't already get matched somehow
-                    already_matched = await db_pool.fetchrow('SELECT 1 FROM active_chats WHERE user_id=$1', t)
-                    if already_matched:
-                        return
-                    matched = await _try_match(t, p, context.bot)
-                    if not matched:
-                        await context.bot.send_message(t, f'\U0001f50e Searching for {lb}...')
-                        await asyncio.sleep(MATCH_INVITE_DELAY)
-                        if await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', t):
-                            link = f'https://t.me/{context.bot.username}?start={t}'
-                            await context.bot.send_message(t,
-                                f'\U0001f50e Still searching?\n\nInvite {VIP_REFERRAL_THRESHOLD} friends and unlock '
-                                f'\U0001f451 VIP for {VIP_REFERRAL_DAYS} days!\n\nYour link:\n{link}')
-                except asyncio.CancelledError: pass
-                except Exception as e: logger.warning('delayed_search error %s: %s', t, e)
-
-            # Queue user immediately so they show up for others searching right now
-            await db_pool.execute(
-                'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
-                target, pref)
-            asyncio.create_task(delayed_search())
-        except Exception as e:
-            logger.warning('Auto-rematch failed for %s: %s', target, e)
     return True
 
 
@@ -926,18 +873,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid == ADMIN_ID or await check_vip(uid): context.user_data['last_pref'] = 'Female'; await match_user(update, context, 'Female')
         else: await update.message.reply_text('\U0001f451 VIP required to filter by gender.\n\nUse \U0001f48e VIP to learn more.')
         return
-    if text == '\u23ed\ufe0f Next': await stop_chat(update, context, quitter_auto_search=True); await match_user(update, context); return
-    if text == '\u274c Stop':
-        partner = await get_partner(uid)
-        if partner:
-            # In a chat → BOTH users auto-search after ending
-            await stop_chat(update, context, quitter_auto_search=True)
-        else:
-            # In search queue → just cancel, no auto-search
-            await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
-            cancel_invite_timer(context)
-            await update.message.reply_text('\u26d4 Search stopped.', reply_markup=get_main_keyboard(uid))
-        return
+    if text == '\u23ed\ufe0f Next': await stop_chat(update, context); await match_user(update, context); return
+    if text == '\u274c Stop': await stop_chat(update, context); return
 
     if text == '\U0001f48e VIP':
         if uid == ADMIN_ID:
