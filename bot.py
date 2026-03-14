@@ -374,6 +374,18 @@ async def stats_command(update, context):
     male_pct   = round(male/total*100)   if total else 0
     female_pct = round(female/total*100) if total else 0
 
+    # Active users = currently in a chat or waiting
+    active_male   = await db_pool.fetchval(
+        '''SELECT COUNT(*) FROM users u
+           WHERE u.gender='Male' AND (
+               EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)
+            OR EXISTS(SELECT 1 FROM waiting_users w  WHERE w.user_id=u.user_id))''')
+    active_female = await db_pool.fetchval(
+        '''SELECT COUNT(*) FROM users u
+           WHERE u.gender='Female' AND (
+               EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)
+            OR EXISTS(SELECT 1 FROM waiting_users w  WHERE w.user_id=u.user_id))''')
+
     lines = [
         '\U0001f4ca Full Stats\n',
         f'\U0001f464 Total users:    {total}',
@@ -384,6 +396,8 @@ async def stats_command(update, context):
         f'\U0001f4c6 This week:      {week}',
         f'\n\U0001f4ac Active chats:  {active}',
         f'\U0001f50e Waiting:        {waiting}',
+        f'\U0001f468\u2705 Active males:  {active_male}',
+        f'\U0001f469\u2705 Active females:{active_female}',
         f'\U0001f4dd Total messages: {total_msgs}',
         f'\n\U0001f451 VIPs:           {vips}',
         f'\U0001f6ab Banned:         {banned}',
