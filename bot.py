@@ -16,8 +16,7 @@ MATCH_INVITE_DELAY     = 45
 FREE_TOD_LIMIT         = 3
 
 db_pool: asyncpg.Pool = None
-context_tod_counts: dict = {}
-user_last_pref: dict = {}   # uid -> last search preference ('Male', 'Female', or None)
+context_tod_counts: dict = {}  # in-memory per session, cleaned on stop — acceptable
 
 async def init_db():
     await db_pool.execute('''
@@ -53,7 +52,8 @@ async def init_db():
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by    BIGINT',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INT DEFAULT 0',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expiry     TIMESTAMP WITH TIME ZONE',
-        'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_messages INT DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_messages  INT DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS last_search_pref TEXT',
     ]: await db_pool.execute(s)
     logger.info('DB ready')
 
@@ -248,8 +248,18 @@ async def broadcast(update, context):
     rows = await db_pool.fetch('SELECT user_id FROM users')
     sent = 0
     for r in rows:
-        try: await context.bot.send_message(r['user_id'], msg); sent += 1; await asyncio.sleep(0.05)
-        except: pass
+        try:
+            await context.bot.send_message(r['user_id'], msg)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            if 'Retry After' in str(e) or 'retry_after' in str(e).lower():
+                import re
+                wait = int(re.search(r'\d+', str(e)).group() or 5)
+                await asyncio.sleep(wait)
+                try: await context.bot.send_message(r['user_id'], msg); sent += 1
+                except: pass
+            # else: user blocked bot or deactivated — skip silently
     await update.message.reply_text(f'\u2705 Sent to {sent} users')
 
 async def handle_ban(update, context):
@@ -518,7 +528,8 @@ async def match_user(update, context, pref=None):
         await context.bot.send_message(uid,     '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(uid))
         await context.bot.send_message(partner, '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(partner))
     else:
-        user_last_pref[uid] = pref   # remember for auto-rematch
+        context.user_data['last_pref'] = pref  # fast in-session access
+        await db_pool.execute('UPDATE users SET last_search_pref=$1 WHERE user_id=$2', pref, uid)
         await db_pool.execute(
             'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
             uid, pref)
@@ -536,7 +547,7 @@ async def match_user(update, context, pref=None):
             finally: context.user_data.pop('invite_task', None)
         context.user_data['invite_task'] = asyncio.create_task(invite_prompt())
 
-async def stop_chat(update, context):
+async def stop_chat(update, context, quitter_auto_search=False):
     uid = update.message.from_user.id
     await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
     cancel_invite_timer(context)
@@ -552,32 +563,61 @@ async def stop_chat(update, context):
     try:
         await context.bot.send_message(partner, '\U0001f44b Stranger left the chat.', reply_markup=get_main_keyboard(partner))
         await context.bot.send_message(partner, 'Did something go wrong?', reply_markup=report_inline(uid))
-        # Auto-rematch survivor with their last used preference
-        pref = user_last_pref.get(partner)
-        # VIP check — only use gender pref if still VIP
-        if pref and partner != ADMIN_ID and not await check_vip(partner):
-            pref = None
-        await db_pool.execute(
-            'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
-            partner, pref)
-        user_last_pref[partner] = pref
-        # Try to find an immediate match, otherwise queue silently
-        matched = await _try_match(partner, pref, context.bot)
-        if not matched:
-            label = f'a {pref} partner' if pref else 'a new partner'
-            await context.bot.send_message(partner, f'\U0001f50e Searching for {label} automatically...')
-            async def auto_invite():
-                try:
-                    await asyncio.sleep(MATCH_INVITE_DELAY)
-                    if await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', partner):
-                        link = f'https://t.me/{context.bot.username}?start={partner}'
-                        await context.bot.send_message(partner,
-                            f'\U0001f50e Still searching?\n\nInvite {VIP_REFERRAL_THRESHOLD} friends and unlock '
-                            f'\U0001f451 VIP for {VIP_REFERRAL_DAYS} days!\n\nYour link:\n{link}')
-                except asyncio.CancelledError: pass
-            asyncio.create_task(auto_invite())
     except Exception as e:
-        logger.warning('Could not notify/rematch partner %s: %s', partner, e)
+        logger.warning('Could not notify partner %s: %s', partner, e)
+
+    # ❌ Stop  → quitter_auto_search=False → only PARTNER auto-searches
+    # ⏭ Next  → quitter_auto_search=False → only PARTNER auto-searches (match_user handles quitter)
+    # Both cases: partner always auto-searches, quitter never double-searches
+    targets = [partner]
+    if quitter_auto_search:
+        targets.append(uid)
+
+    for i, target in enumerate(targets):
+        if i > 0: await asyncio.sleep(0.3)  # tiny delay prevents same-pair rematch
+        try:
+            # Read last pref from DB — survives restarts, no memory leak
+            pref_row = await db_pool.fetchrow('SELECT last_search_pref FROM users WHERE user_id=$1', target)
+            pref = pref_row['last_search_pref'] if pref_row else None
+            if pref and target != ADMIN_ID and not await check_vip(target):
+                pref = None
+            label = f'a {pref} partner' if pref else 'a new partner'
+
+            # 5 second window — user can press ❌ Stop to cancel before search starts
+            await context.bot.send_message(target,
+                f'\U0001f504 Searching for {label} in 5 seconds...\n\nPress \u274c Stop to cancel.')
+
+            async def delayed_search(t=target, p=pref, lb=label):
+                try:
+                    await asyncio.sleep(5)
+                    # Check user didn't press Stop during the 5s window
+                    still_free = await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', t)
+                    if not still_free:
+                        # They were removed from queue (pressed Stop) — abort
+                        return
+                    # Also check they didn't already get matched somehow
+                    already_matched = await db_pool.fetchrow('SELECT 1 FROM active_chats WHERE user_id=$1', t)
+                    if already_matched:
+                        return
+                    matched = await _try_match(t, p, context.bot)
+                    if not matched:
+                        await context.bot.send_message(t, f'\U0001f50e Searching for {lb}...')
+                        await asyncio.sleep(MATCH_INVITE_DELAY)
+                        if await db_pool.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', t):
+                            link = f'https://t.me/{context.bot.username}?start={t}'
+                            await context.bot.send_message(t,
+                                f'\U0001f50e Still searching?\n\nInvite {VIP_REFERRAL_THRESHOLD} friends and unlock '
+                                f'\U0001f451 VIP for {VIP_REFERRAL_DAYS} days!\n\nYour link:\n{link}')
+                except asyncio.CancelledError: pass
+                except Exception as e: logger.warning('delayed_search error %s: %s', t, e)
+
+            # Queue user immediately so they show up for others searching right now
+            await db_pool.execute(
+                'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
+                target, pref)
+            asyncio.create_task(delayed_search())
+        except Exception as e:
+            logger.warning('Auto-rematch failed for %s: %s', target, e)
     return True
 
 
@@ -732,7 +772,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # (a) user has a row but is incomplete, OR
         # (b) user has no row yet but has a step in context (mid-registration, no DB row yet)
         in_registration = context.user_data.get('step') is not None
-        if not in_registration and await user_exists(uid) and not await is_registered(uid):
+        # Cache registration status — avoids DB hit on every message
+        if not in_registration and not context.user_data.get('registered'):
+            if await user_exists(uid) and not await is_registered(uid):
+                pass  # fall through to registration block
+            elif await user_exists(uid):
+                context.user_data['registered'] = True  # cache it
+        if not in_registration and not context.user_data.get('registered') and await user_exists(uid) and not await is_registered(uid):
             # Bot restarted mid-registration — recover step from DB
             db_step = await get_registration_step(uid)
             context.user_data['step'] = db_step or 'name'
@@ -775,6 +821,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.error('age save error %s: %s', uid, e)
                         await update.message.reply_text('Error saving. Try again.'); return
                     context.user_data.clear()
+                    context.user_data['registered'] = True  # cache — skip DB check on every future message
                     await update.message.reply_text(
                         'Registration complete \U0001f389\n\nUse the buttons below to find a chat partner!',
                         reply_markup=user_keyboard)
@@ -870,17 +917,27 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('Main menu', reply_markup=admin_main_keyboard); return
 
     # ── SHARED BUTTONS ──
-    if text == '\U0001f680 Find Partner': user_last_pref[uid] = None; await match_user(update, context); return
+    if text == '\U0001f680 Find Partner': context.user_data['last_pref'] = None; await match_user(update, context); return
     if text == '\U0001f468 Find Male':
-        if uid == ADMIN_ID or await check_vip(uid): user_last_pref[uid] = 'Male'; await match_user(update, context, 'Male')
+        if uid == ADMIN_ID or await check_vip(uid): context.user_data['last_pref'] = 'Male'; await match_user(update, context, 'Male')
         else: await update.message.reply_text('\U0001f451 VIP required to filter by gender.\n\nUse \U0001f48e VIP to learn more.')
         return
     if text == '\U0001f469 Find Female':
-        if uid == ADMIN_ID or await check_vip(uid): user_last_pref[uid] = 'Female'; await match_user(update, context, 'Female')
+        if uid == ADMIN_ID or await check_vip(uid): context.user_data['last_pref'] = 'Female'; await match_user(update, context, 'Female')
         else: await update.message.reply_text('\U0001f451 VIP required to filter by gender.\n\nUse \U0001f48e VIP to learn more.')
         return
-    if text == '\u23ed\ufe0f Next': await stop_chat(update, context); await match_user(update, context); return
-    if text == '\u274c Stop': await stop_chat(update, context); return
+    if text == '\u23ed\ufe0f Next': await stop_chat(update, context, quitter_auto_search=True); await match_user(update, context); return
+    if text == '\u274c Stop':
+        partner = await get_partner(uid)
+        if partner:
+            # In a chat → BOTH users auto-search after ending
+            await stop_chat(update, context, quitter_auto_search=True)
+        else:
+            # In search queue → just cancel, no auto-search
+            await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
+            cancel_invite_timer(context)
+            await update.message.reply_text('\u26d4 Search stopped.', reply_markup=get_main_keyboard(uid))
+        return
 
     if text == '\U0001f48e VIP':
         if uid == ADMIN_ID:
@@ -966,6 +1023,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p = prompts.get(db_step, ("Let's finish your profile.\n\nEnter your name:", None))
             await update.message.reply_text(p[0], reply_markup=p[1] if p[1] else ReplyKeyboardRemove())
         else:
+            context.user_data['registered'] = True
             await update.message.reply_text('Welcome back! \U0001f44b', reply_markup=user_keyboard)
         return
     # Don't INSERT yet — store ref in context and only write to DB after all fields collected
@@ -979,7 +1037,7 @@ async def main():
     global db_pool
     dsn = DATABASE_URL
     if dsn and dsn.startswith('postgres://'): dsn = dsn.replace('postgres://', 'postgresql://', 1)
-    db_pool = await asyncpg.create_pool(dsn, min_size=2, max_size=20)
+    db_pool = await asyncpg.create_pool(dsn, min_size=5, max_size=50)
     await init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start',      start))
