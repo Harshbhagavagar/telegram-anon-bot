@@ -46,6 +46,7 @@ async def init_db():
         'CREATE INDEX IF NOT EXISTS idx_ve  ON users(vip_expiry)',
         'CREATE INDEX IF NOT EXISTS idx_rr  ON reports(reported_id)',
         'CREATE INDEX IF NOT EXISTS idx_clp ON chat_logs(sender_id,partner_id)',
+        'CREATE INDEX IF NOT EXISTS idx_ac_partner ON active_chats(partner_id)',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned      BOOLEAN DEFAULT FALSE',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS age            INT',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS country        TEXT',
@@ -227,6 +228,11 @@ async def clean_dead_chats(bot):
         if not ua or not pa:
             await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', uid)
             await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', partner)
+            # Also remove dead users from waiting queue
+            if not ua:
+                await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', uid)
+            if not pa:
+                await db_pool.execute('DELETE FROM waiting_users WHERE user_id=$1', partner)
             cleaned += 1
             if ua:
                 try: await bot.send_message(uid, '\u26a0\ufe0f Partner disconnected. Press \U0001f680 Find Partner.')
@@ -388,16 +394,22 @@ async def stats_command(update, context):
     female_pct = round(female/total*100) if total else 0
 
     # Active users = currently in a chat or waiting
-    active_male   = await db_pool.fetchval(
-        '''SELECT COUNT(*) FROM users u
-           WHERE u.gender='Male' AND (
-               EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)
-            OR EXISTS(SELECT 1 FROM waiting_users w  WHERE w.user_id=u.user_id))''')
-    active_female = await db_pool.fetchval(
-        '''SELECT COUNT(*) FROM users u
-           WHERE u.gender='Female' AND (
-               EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)
-            OR EXISTS(SELECT 1 FROM waiting_users w  WHERE w.user_id=u.user_id))''')
+    inchat_male   = await db_pool.fetchval(
+        """SELECT COUNT(*) FROM users u
+           WHERE u.gender='Male'
+             AND EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)""")
+    inchat_female = await db_pool.fetchval(
+        """SELECT COUNT(*) FROM users u
+           WHERE u.gender='Female'
+             AND EXISTS(SELECT 1 FROM active_chats ac WHERE ac.user_id=u.user_id)""")
+    searching_male   = await db_pool.fetchval(
+        """SELECT COUNT(*) FROM users u
+           WHERE u.gender='Male'
+             AND EXISTS(SELECT 1 FROM waiting_users w WHERE w.user_id=u.user_id)""")
+    searching_female = await db_pool.fetchval(
+        """SELECT COUNT(*) FROM users u
+           WHERE u.gender='Female'
+             AND EXISTS(SELECT 1 FROM waiting_users w WHERE w.user_id=u.user_id)""")
 
     lines = [
         '\U0001f4ca Full Stats\n',
@@ -409,8 +421,10 @@ async def stats_command(update, context):
         f'\U0001f4c6 This week:      {week}',
         f'\n\U0001f4ac Active chats:  {active}',
         f'\U0001f50e Waiting:        {waiting}',
-        f'\U0001f468\u2705 Active males:  {active_male}',
-        f'\U0001f469\u2705 Active females:{active_female}',
+        f'\U0001f468\U0001f4ac In chat males:   {inchat_male}',
+        f'\U0001f469\U0001f4ac In chat females: {inchat_female}',
+        f'\U0001f468\U0001f50e Searching males:   {searching_male}',
+        f'\U0001f469\U0001f50e Searching females: {searching_female}',
         f'\U0001f4dd Total messages: {total_msgs}',
         f'\n\U0001f451 VIPs:           {vips}',
         f'\U0001f6ab Banned:         {banned}',
@@ -475,8 +489,11 @@ async def match_user(update, context, pref=None):
                 if not await conn.fetchval('SELECT pg_try_advisory_xact_lock($1)', c): continue
                 if not await conn.fetchrow('SELECT 1 FROM waiting_users WHERE user_id=$1', c): continue
                 await conn.execute('DELETE FROM waiting_users WHERE user_id=$1', c)
-                await conn.execute('INSERT INTO active_chats VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id', uid, c)
-                await conn.execute('INSERT INTO active_chats VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET partner_id=EXCLUDED.partner_id', c, uid)
+                # Clean any stale chat rows before inserting fresh ones
+                await conn.execute('DELETE FROM active_chats WHERE user_id=$1', uid)
+                await conn.execute('DELETE FROM active_chats WHERE user_id=$1', c)
+                await conn.execute('INSERT INTO active_chats VALUES($1,$2)', uid, c)
+                await conn.execute('INSERT INTO active_chats VALUES($1,$2)', c, uid)
                 partner = c; break
     if partner:
         cancel_invite_timer(context)
@@ -780,7 +797,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid == ADMIN_ID and context.user_data.get('in_admin_panel'):
         if text == '\U0001f4ca Analytics':
             total  = await db_pool.fetchval('SELECT COUNT(*) FROM users')
-            active = (await db_pool.fetchval('SELECT COUNT(*) FROM active_chats') or 0) // 2
+            active = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
             wait   = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
             vips   = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW()")
             bans   = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE is_banned=TRUE')
@@ -790,7 +807,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f'\U0001f50e Waiting: {wait}\n\U0001f451 VIPs: {vips}\n\U0001f6ab Banned: {bans}\n\U0001f6a8 Reports: {reps}')
             return
         if text == '\U0001f465 Active Users':
-            n = (await db_pool.fetchval('SELECT COUNT(*) FROM active_chats') or 0) // 2
+            n = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
             await update.message.reply_text(f'\U0001f4ac Active chats: {n}'); return
         if text == '\U0001f552 Waiting Users':
             n = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
@@ -845,11 +862,26 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = await db_pool.fetch(
                     'SELECT user_id FROM users WHERE is_banned=FALSE AND name IS NOT NULL AND age IS NOT NULL')
             sent = 0
+            blocked = 0
             for r in rows:
-                try: await update.message.copy(chat_id=r['user_id']); sent += 1; await asyncio.sleep(0.05)
-                except: pass
+                try:
+                    await update.message.copy(chat_id=r['user_id'])
+                    sent += 1
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    blocked += 1
+                    if 'Retry After' in str(e) or 'retry_after' in str(e).lower():
+                        import re as _re
+                        wait = int(_re.search(r'\d+', str(e)).group() or 5)
+                        await asyncio.sleep(wait)
+                        try:
+                            await update.message.copy(chat_id=r['user_id'])
+                            sent += 1; blocked -= 1
+                        except: pass
             label = 'female users' if target == 'female' else 'all users'
-            await update.message.reply_text(f'\U0001f4e2 Sent to {sent} {label}.'); return
+            await update.message.reply_text(
+                f'\U0001f4e2 Sent to {sent} {label}.\n'
+                f'\U0001f6ab Blocked/unreachable: {blocked}'); return
         if text == '\u2b05\ufe0f Back':
             context.user_data['in_admin_panel'] = False
             context.user_data.pop('announce_mode', None)
