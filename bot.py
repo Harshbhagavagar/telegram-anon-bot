@@ -988,9 +988,21 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_del_report_callback,   pattern=r'^admin_del_report:'))
     app.add_handler(CallbackQueryHandler(admin_back_reports_callback, pattern=r'^admin_back_reports$'))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
-    logger.info('Bot started')
-    await app.initialize(); await app.start()
+    logger.info('Bot starting...')
+    # Retry initialization — handles temporary network issues on Railway
+    for attempt in range(1, 11):
+        try:
+            await app.initialize()
+            await app.start()
+            break
+        except Exception as e:
+            logger.warning('Init attempt %d/10 failed: %s', attempt, e)
+            if attempt == 10:
+                logger.error('Could not connect to Telegram after 10 attempts. Exiting.')
+                raise
+            await asyncio.sleep(attempt * 2)  # 2s, 4s, 6s... backoff
     await app.updater.start_polling(drop_pending_updates=True)
+    logger.info('Bot started successfully')
     try: await asyncio.Event().wait()
     finally:
         logger.info('Shutting down...')
