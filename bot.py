@@ -667,6 +667,16 @@ async def admin_back_reports_callback(update, context):
     await q.edit_message_text('\U0001f6a8 Recent Reports:', reply_markup=InlineKeyboardMarkup(buttons))
 
 
+async def announce_target_callback(update, context):
+    q = update.callback_query
+    if q.from_user.id != ADMIN_ID: await q.answer('Not authorized.', show_alert=True); return
+    await q.answer()
+    target = q.data.split(':')[1]  # 'all' or 'female'
+    context.user_data['announce_mode'] = True
+    context.user_data['announce_target'] = target
+    label = '👩 females only' if target == 'female' else '👥 all users'
+    await q.edit_message_text(f'Sending to {label}.\n\nNow send your announcement message:')
+
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     uid  = update.message.from_user.id
@@ -814,20 +824,32 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             n = await clean_dead_chats(context.bot)
             await update.message.reply_text(f'\u2705 Removed {n} dead chat(s).'); return
         if text == '\U0001f4e2 Announcement':
-            context.user_data['announce_mode'] = True
-            await update.message.reply_text('Send the announcement message now:'); return
+            # Show target selection inline buttons
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton('\U0001f465 All Users',    callback_data='announce_target:all'),
+                InlineKeyboardButton('\U0001f469 Females Only', callback_data='announce_target:female'),
+            ]])
+            await update.message.reply_text('Who do you want to send to?', reply_markup=markup); return
         if context.user_data.get('announce_mode'):
             if text == '\u2b05\ufe0f Back':
-                context.user_data['announce_mode'] = False
-                await update.message.reply_text('Cancelled.', reply_markup=admin_panel_keyboard); return
-            context.user_data['announce_mode'] = False
-            rows = await db_pool.fetch(
-                'SELECT user_id FROM users WHERE is_banned=FALSE AND name IS NOT NULL AND age IS NOT NULL')
+                context.user_data.pop('announce_mode', None)
+                context.user_data.pop('announce_target', None)
+                await update.message.reply_text('\u274c Announcement cancelled.', reply_markup=admin_panel_keyboard); return
+            target = context.user_data.get('announce_target', 'all')
+            context.user_data.pop('announce_mode', None)
+            context.user_data.pop('announce_target', None)
+            if target == 'female':
+                rows = await db_pool.fetch(
+                    "SELECT user_id FROM users WHERE is_banned=FALSE AND name IS NOT NULL AND age IS NOT NULL AND gender='Female'")
+            else:
+                rows = await db_pool.fetch(
+                    'SELECT user_id FROM users WHERE is_banned=FALSE AND name IS NOT NULL AND age IS NOT NULL')
             sent = 0
             for r in rows:
                 try: await update.message.copy(chat_id=r['user_id']); sent += 1; await asyncio.sleep(0.05)
                 except: pass
-            await update.message.reply_text(f'\U0001f4e2 Sent to {sent} users.'); return
+            label = 'female users' if target == 'female' else 'all users'
+            await update.message.reply_text(f'\U0001f4e2 Sent to {sent} {label}.'); return
         if text == '\u2b05\ufe0f Back':
             context.user_data['in_admin_panel'] = False
             context.user_data.pop('announce_mode', None)
@@ -958,6 +980,7 @@ async def main():
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
     app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
+    app.add_handler(CallbackQueryHandler(announce_target_callback, pattern=r'^announce_target:'))
     app.add_handler(CallbackQueryHandler(report_callback,             pattern=r'^report:'))
     app.add_handler(CallbackQueryHandler(tod_callback,                pattern=r'^tod_'))
     app.add_handler(CallbackQueryHandler(admin_report_callback,       pattern=r'^admin_report:'))
