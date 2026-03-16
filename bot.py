@@ -381,7 +381,9 @@ async def stats_command(update, context):
     incomplete = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE name IS NULL OR gender IS NULL OR country IS NULL OR age IS NULL')
     active     = (await db_pool.fetchval('SELECT COUNT(*) FROM active_chats') or 0) // 2
     waiting    = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
-    vips       = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW()")
+    vips          = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW()")
+    vip_male      = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Male'   AND ((is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW())")
+    vip_female    = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Female' AND ((is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW())")
     banned     = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE is_banned=TRUE')
     reports    = await db_pool.fetchval('SELECT COUNT(*) FROM reports')
     total_msgs = await db_pool.fetchval('SELECT COALESCE(SUM(total_messages),0) FROM users')
@@ -426,7 +428,9 @@ async def stats_command(update, context):
         f'\U0001f468\U0001f50e Searching males:   {searching_male}',
         f'\U0001f469\U0001f50e Searching females: {searching_female}',
         f'\U0001f4dd Total messages: {total_msgs}',
-        f'\n\U0001f451 VIPs:           {vips}',
+        f'\n\U0001f451 VIPs total:     {vips}',
+        f'\U0001f468\U0001f451 Male VIPs:     {vip_male}',
+        f'\U0001f469\U0001f451 Female VIPs:   {vip_female}',
         f'\U0001f6ab Banned:         {banned}',
         f'\U0001f6a8 Reports:        {reports}',
     ]
@@ -438,6 +442,37 @@ async def stats_command(update, context):
             lines.append(f"  {name} ({uname}) — {r['referral_count']} refs")
 
     await update.message.reply_text('\n'.join(lines))
+
+async def vipfemales_command(update, context):
+    """Grant 7 days VIP to all female users and notify them."""
+    if update.message.from_user.id != ADMIN_ID: return
+    rows = await db_pool.fetch(
+        """SELECT user_id FROM users
+           WHERE gender='Female' AND is_banned=FALSE
+             AND name IS NOT NULL AND age IS NOT NULL""")
+    if not rows:
+        await update.message.reply_text('\u274c No female users found.'); return
+    sent = 0; already = 0; failed = 0
+    for r in rows:
+        await grant_vip(r['user_id'], 7)
+        try:
+            await context.bot.send_message(
+                r['user_id'],
+                '\U0001f451 You just got 7 days of FREE VIP!\n\n'
+                '\U0001f389 As a VIP you can now:\n'
+                '\u2022 Filter matches by gender (Find Male / Find Female)\n'
+                '\u2022 Unlimited Truth or Dare rounds\n\n'
+                'Enjoy your VIP! \U0001f48e\n\n'
+                'Press \U0001f680 Find Partner to start chatting!')
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+    await update.message.reply_text(
+        f'\U0001f451 Done!\n\n'
+        f'\u2705 VIP granted + notified: {sent}\n'
+        f'\U0001f6ab Could not notify (blocked): {failed}\n'
+        f'\U0001f4ca Total females upgraded: {len(rows)}')
 
 async def debug_referral(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -1010,6 +1045,7 @@ async def main():
     app.add_handler(CommandHandler('regrantvip', regrant_vip_command))
     app.add_handler(CommandHandler('cleanup',    cleanup_null_users))
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
+    app.add_handler(CommandHandler('vipfemales', vipfemales_command))
     app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
     app.add_handler(CallbackQueryHandler(announce_target_callback, pattern=r'^announce_target:'))
