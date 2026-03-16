@@ -448,8 +448,7 @@ async def vipfemales_command(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     rows = await db_pool.fetch(
         """SELECT user_id FROM users
-           WHERE gender='Female' AND is_banned=FALSE
-             AND name IS NOT NULL AND age IS NOT NULL""")
+           WHERE gender='Female' AND is_banned=FALSE""")
     if not rows:
         await update.message.reply_text('\u274c No female users found.'); return
     sent = 0; already = 0; failed = 0
@@ -737,6 +736,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_banned_check(uid):
         await update.message.reply_text('\U0001f6ab You are banned from using this bot.')
         return
+
+    # Keep username in sync — Telegram usernames can change anytime
+    current_username = update.message.from_user.username
+    if current_username and context.user_data.get('last_username') != current_username:
+        context.user_data['last_username'] = current_username
+        await db_pool.execute(
+            'UPDATE users SET username=$1 WHERE user_id=$2',
+            current_username, uid)
 
     # ── REGISTRATION GATE ── ALL 4 fields required before anything works
     if uid != ADMIN_ID:
