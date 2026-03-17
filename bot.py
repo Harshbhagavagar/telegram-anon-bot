@@ -532,10 +532,22 @@ async def match_user(update, context, pref=None):
     if partner:
         cancel_invite_timer(context)
         context_tod_counts.pop(uid, None); context_tod_counts.pop(partner, None)
-        await context.bot.send_message(uid,     '\u2705 Connected! Say hi \U0001f44b')
-        await context.bot.send_message(partner, '\u2705 Connected! Say hi \U0001f44b')
-        await context.bot.send_message(uid,     '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(uid))
-        await context.bot.send_message(partner, '\U0001f3b2 Want to break the ice?', reply_markup=tod_inline(partner))
+        await context.bot.send_message(uid,
+        '\u2705 You\'re now connected with a stranger!\n\n'
+        '\U0001f4ac Say hi and start chatting \U0001f44b\n'
+        '\U0001f512 Remember: Be kind & respectful')
+        await context.bot.send_message(partner,
+        '\u2705 You\'re now connected with a stranger!\n\n'
+        '\U0001f4ac Say hi and start chatting \U0001f44b\n'
+        '\U0001f512 Remember: Be kind & respectful')
+        await context.bot.send_message(uid,
+            '\U0001f3b2 Want to make this chat more fun?\n'
+            'Play Truth or Dare with your partner \U0001f447',
+            reply_markup=tod_inline(uid))
+        await context.bot.send_message(partner,
+            '\U0001f3b2 Want to make this chat more fun?\n'
+            'Play Truth or Dare with your partner \U0001f447',
+            reply_markup=tod_inline(partner))
     else:
         context.user_data['last_pref'] = pref  # fast in-session access
         await db_pool.execute('UPDATE users SET last_search_pref=$1 WHERE user_id=$2', pref, uid)
@@ -543,7 +555,10 @@ async def match_user(update, context, pref=None):
             'INSERT INTO waiting_users(user_id,preferred_gender) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET preferred_gender=EXCLUDED.preferred_gender',
             uid, pref)
         label = f'Searching for a {pref} partner...' if pref else 'Searching for a partner...'
-        await update.message.reply_text(f'\U0001f50e {label}')
+        await update.message.reply_text(
+            f'\U0001f50e {label}\n\n'
+            '\u23f3 Please wait while we find you a match...\n'
+            'You can press \u274c Stop anytime to cancel.')
         async def invite_prompt():
             try:
                 await asyncio.sleep(MATCH_INVITE_DELAY)
@@ -562,16 +577,42 @@ async def stop_chat(update, context):
     cancel_invite_timer(context)
     partner = await get_partner(uid)
     if not partner:
-        await update.message.reply_text('\u26d4 Search stopped.', reply_markup=get_main_keyboard(uid))
+        await update.message.reply_text(
+            '\u26d4 Search stopped.\n\n'
+            'Press \U0001f680 Find Partner whenever you\'re ready!',
+            reply_markup=get_main_keyboard(uid))
         return False
     await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', uid)
     await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', partner)
     context_tod_counts.pop(uid, None); context_tod_counts.pop(partner, None)
-    await update.message.reply_text('\u274c Chat ended.', reply_markup=get_main_keyboard(uid))
-    await update.message.reply_text('Did something go wrong?', reply_markup=report_inline(partner))
+    # Quitter side
+    quitter_msg = (
+        '\U0001f44b You left the chat.\n\n'
+        '💭 Hope you had a good conversation!\n'
+        'Want to meet someone new?\n\n'
+        'Press \U0001f680 Find Partner to continue chatting.'
+    )
+    report_markup_for_quitter = InlineKeyboardMarkup([[
+        InlineKeyboardButton('\u26a0\ufe0f Report', callback_data=f'report:{partner}'),
+        InlineKeyboardButton('\U0001f680 Find New', callback_data='find_new'),
+    ]])
+    await update.message.reply_text(quitter_msg, reply_markup=get_main_keyboard(uid))
+    await update.message.reply_text('Was there a problem?', reply_markup=report_markup_for_quitter)
+
+    # Partner side
+    partner_msg = (
+        '\U0001f44b Your partner left the chat.\n\n'
+        '💭 Every stranger is a new adventure!\n'
+        'Want to meet someone new?\n\n'
+        'Press \U0001f680 Find Partner to continue chatting.'
+    )
+    report_markup_for_partner = InlineKeyboardMarkup([[
+        InlineKeyboardButton('\u26a0\ufe0f Report', callback_data=f'report:{uid}'),
+        InlineKeyboardButton('\U0001f680 Find New', callback_data='find_new'),
+    ]])
     try:
-        await context.bot.send_message(partner, '\U0001f44b Stranger left the chat.', reply_markup=get_main_keyboard(partner))
-        await context.bot.send_message(partner, 'Did something go wrong?', reply_markup=report_inline(uid))
+        await context.bot.send_message(partner, partner_msg, reply_markup=get_main_keyboard(partner))
+        await context.bot.send_message(partner, 'Was there a problem?', reply_markup=report_markup_for_partner)
     except Exception as e:
         logger.warning('Could not notify partner %s: %s', partner, e)
     return True
@@ -718,6 +759,11 @@ async def admin_back_reports_callback(update, context):
     await q.edit_message_text('\U0001f6a8 Recent Reports:', reply_markup=InlineKeyboardMarkup(buttons))
 
 
+async def find_new_callback(update, context):
+    """Find New inline button — just answer the query, user uses keyboard to search."""
+    q = update.callback_query
+    await q.answer('Press \U0001f680 Find Partner to search!', show_alert=False)
+
 async def announce_target_callback(update, context):
     q = update.callback_query
     if q.from_user.id != ADMIN_ID: await q.answer('Not authorized.', show_alert=True); return
@@ -833,7 +879,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── ADMIN PANEL ──
     if text == '\u2699\ufe0f Admin Panel' and uid == ADMIN_ID:
         context.user_data['in_admin_panel'] = True
-        await update.message.reply_text('\u2699\ufe0f Admin Panel', reply_markup=admin_panel_keyboard)
+        total   = await db_pool.fetchval('SELECT COUNT(*) FROM users')
+        active  = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
+        waiting = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
+        male    = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Male'")
+        female  = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Female'")
+        await update.message.reply_text(
+            f'\u2699\ufe0f Admin Panel\n\n'
+            f'\U0001f464 Total users:  {total}\n'
+            f'\U0001f468 Male:         {male}\n'
+            f'\U0001f469 Female:       {female}\n'
+            f'\U0001f4ac Active chats: {active}\n'
+            f'\U0001f50e Searching:    {waiting}',
+            reply_markup=admin_panel_keyboard)
         return
 
     if uid == ADMIN_ID and context.user_data.get('in_admin_panel'):
@@ -1055,6 +1113,7 @@ async def main():
     app.add_handler(CommandHandler('vipfemales', vipfemales_command))
     app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
+    app.add_handler(CallbackQueryHandler(find_new_callback,       pattern=r'^find_new$'))
     app.add_handler(CallbackQueryHandler(announce_target_callback, pattern=r'^announce_target:'))
     app.add_handler(CallbackQueryHandler(report_callback,             pattern=r'^report:'))
     app.add_handler(CallbackQueryHandler(tod_callback,                pattern=r'^tod_'))
@@ -1063,6 +1122,19 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_del_report_callback,   pattern=r'^admin_del_report:'))
     app.add_handler(CallbackQueryHandler(admin_back_reports_callback, pattern=r'^admin_back_reports$'))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
+    async def update_bot_description():
+        """Updates bot short description with live user count every 10 minutes."""
+        while True:
+            try:
+                total  = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE name IS NOT NULL AND age IS NOT NULL') or 0
+                active = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
+                await app.bot.set_my_short_description(
+                    f'👥 {total:,} users'
+                )
+            except Exception as e:
+                logger.warning('Could not update bot description: %s', e)
+            await asyncio.sleep(600)  # update every 10 minutes
+
     logger.info('Bot starting...')
     # Retry initialization — handles temporary network issues on Railway
     for attempt in range(1, 11):
@@ -1077,6 +1149,7 @@ async def main():
                 raise
             await asyncio.sleep(attempt * 2)  # 2s, 4s, 6s... backoff
     await app.updater.start_polling(drop_pending_updates=True)
+    asyncio.create_task(update_bot_description())
     logger.info('Bot started successfully')
     try: await asyncio.Event().wait()
     finally:
