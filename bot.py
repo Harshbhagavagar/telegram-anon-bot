@@ -473,6 +473,145 @@ async def vipfemales_command(update, context):
         f'\U0001f6ab Could not notify (blocked): {failed}\n'
         f'\U0001f4ca Total females upgraded: {len(rows)}')
 
+async def delete_blocked_users(update, context):
+    """Remove users who have blocked the bot to keep DB clean and fast."""
+    if update.message.from_user.id != ADMIN_ID: return
+    await update.message.reply_text('\U0001f50d Scanning for blocked users... this may take a while.')
+
+    rows = await db_pool.fetch(
+        'SELECT user_id FROM users WHERE user_id != $1', ADMIN_ID)
+
+    blocked = 0; errors = 0
+    for r in rows:
+        uid = r['user_id']
+        try:
+            await context.bot.send_chat_action(chat_id=uid, action='typing')
+            await asyncio.sleep(0.05)
+        except Forbidden:
+            # User blocked the bot — remove all their data
+            for q in [
+                'DELETE FROM waiting_users WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE partner_id=$1',
+                'DELETE FROM reports WHERE reporter_id=$1 OR reported_id=$1',
+                'DELETE FROM chat_logs  WHERE sender_id=$1 OR partner_id=$1',
+                'DELETE FROM users      WHERE user_id=$1',
+            ]:
+                await db_pool.execute(q, uid)
+            blocked += 1
+        except Exception:
+            errors += 1  # deactivated account, network error etc — skip
+        await asyncio.sleep(0.05)
+
+    await update.message.reply_text(
+        f'\u2705 Done!\n\n'
+        f'\U0001f6ab Blocked & removed: {blocked}\n'
+        f'\u26a0\ufe0f Skipped (other errors): {errors}\n'
+        f'\U0001f4ca Checked: {len(rows)} users')
+
+async def delete_blocked_users(update, context):
+    """Delete all users who have blocked the bot."""
+    if update.message.from_user.id != ADMIN_ID: return
+    await update.message.reply_text('\U0001f50d Scanning for blocked users... This may take a moment.')
+    rows = await db_pool.fetch(
+        'SELECT user_id FROM users WHERE user_id != $1', ADMIN_ID)
+    deleted = 0; checked = 0
+    for r in rows:
+        checked += 1
+        try:
+            await context.bot.send_chat_action(chat_id=r['user_id'], action='typing')
+        except Forbidden:
+            uid = r['user_id']
+            # Remove from all tables cleanly
+            for q in [
+                'DELETE FROM waiting_users  WHERE user_id=$1',
+                'DELETE FROM active_chats   WHERE user_id=$1',
+                'DELETE FROM active_chats   WHERE partner_id=$1',
+                'DELETE FROM chat_logs      WHERE sender_id=$1 OR partner_id=$1',
+                'DELETE FROM reports        WHERE reporter_id=$1 OR reported_id=$1',
+                'DELETE FROM users          WHERE user_id=$1',
+            ]:
+                await db_pool.execute(q, uid)
+            deleted += 1
+        except Exception:
+            pass  # other errors (timeout etc) — skip, don't delete
+        await asyncio.sleep(0.05)  # avoid hitting Telegram rate limit
+    await update.message.reply_text(
+        f'\u2705 Done!\n\n'
+        f'\U0001f50d Checked:  {checked}\n'
+        f'\U0001f5d1 Deleted:  {deleted} blocked user(s)\n'
+        f'\U0001f464 Remaining: {checked - deleted}')
+
+async def delete_blocked_command(update, context):
+    """Delete all users who have blocked the bot."""
+    if update.message.from_user.id != ADMIN_ID: return
+    await update.message.reply_text('\U0001f50d Scanning for blocked users... This may take a minute.')
+    rows = await db_pool.fetch(
+        'SELECT user_id FROM users WHERE user_id != $1', ADMIN_ID)
+    deleted = 0; checked = 0
+    for r in rows:
+        uid = r['user_id']
+        try:
+            await context.bot.send_chat_action(chat_id=uid, action='typing')
+        except Forbidden:
+            # User blocked the bot — delete all their data
+            for q in [
+                'DELETE FROM waiting_users WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE partner_id=$1',
+                'DELETE FROM reports       WHERE reporter_id=$1 OR reported_id=$1',
+                'DELETE FROM chat_logs     WHERE sender_id=$1 OR partner_id=$1',
+                'DELETE FROM users         WHERE user_id=$1',
+            ]:
+                await db_pool.execute(q, uid)
+            deleted += 1
+        except Exception:
+            pass  # TimedOut or other — skip, don't delete
+        checked += 1
+        await asyncio.sleep(0.05)
+    await update.message.reply_text(
+        f'\u2705 Done!\n\n'
+        f'\U0001f50d Checked: {checked}\n'
+        f'\U0001f5d1 Deleted (blocked): {deleted}\n'
+        f'\U0001f464 Remaining users: {checked - deleted}')
+
+async def delete_blocked_users(update, context):
+    """Remove users who have blocked the bot to keep DB clean and fast."""
+    if update.message.from_user.id != ADMIN_ID: return
+    await update.message.reply_text('\U0001f50d Scanning for blocked users... This may take a while.')
+
+    rows = await db_pool.fetch(
+        'SELECT user_id FROM users WHERE user_id != $1', ADMIN_ID)
+
+    deleted = 0; checked = 0
+    for r in rows:
+        uid = r['user_id']
+        checked += 1
+        try:
+            # send_chat_action is silent (no visible message to user)
+            await context.bot.send_chat_action(chat_id=uid, action='typing')
+            await asyncio.sleep(0.05)
+        except Forbidden:
+            # User blocked the bot — delete all their data
+            for q in [
+                'DELETE FROM waiting_users WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE user_id=$1',
+                'DELETE FROM active_chats  WHERE partner_id=$1',
+                'DELETE FROM reports       WHERE reporter_id=$1 OR reported_id=$1',
+                'DELETE FROM chat_logs     WHERE sender_id=$1 OR partner_id=$1',
+                'DELETE FROM users         WHERE user_id=$1',
+            ]:
+                await db_pool.execute(q, uid)
+            deleted += 1
+        except Exception:
+            pass  # TimedOut or other — skip, don't delete
+
+    await update.message.reply_text(
+        f'\u2705 Done!\n\n'
+        f'\U0001f50d Checked: {checked}\n'
+        f'\U0001f5d1 Deleted (blocked): {deleted}\n'
+        f'\U0001f464 Remaining users: {checked - deleted}')
+
 async def debug_referral(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     if not context.args or not context.args[0].isdigit():
@@ -1097,6 +1236,10 @@ async def main():
     app.add_handler(CommandHandler('cleanup',    cleanup_null_users))
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
     app.add_handler(CommandHandler('vipfemales', vipfemales_command))
+    app.add_handler(CommandHandler('deleteblocked', delete_blocked_users))
+    app.add_handler(CommandHandler('deleteblocked', delete_blocked_command))
+    app.add_handler(CommandHandler('delete',     delete_blocked_users))
+    app.add_handler(CommandHandler('deleteblocked', delete_blocked_users))
     app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
     app.add_handler(CallbackQueryHandler(find_new_callback,       pattern=r'^find_new$'))
