@@ -594,7 +594,6 @@ async def stop_chat(update, context):
     )
     report_markup_for_quitter = InlineKeyboardMarkup([[
         InlineKeyboardButton('\u26a0\ufe0f Report', callback_data=f'report:{partner}'),
-        InlineKeyboardButton('\U0001f680 Find New', callback_data='find_new'),
     ]])
     await update.message.reply_text(quitter_msg, reply_markup=get_main_keyboard(uid))
     await update.message.reply_text('Was there a problem?', reply_markup=report_markup_for_quitter)
@@ -608,7 +607,6 @@ async def stop_chat(update, context):
     )
     report_markup_for_partner = InlineKeyboardMarkup([[
         InlineKeyboardButton('\u26a0\ufe0f Report', callback_data=f'report:{uid}'),
-        InlineKeyboardButton('\U0001f680 Find New', callback_data='find_new'),
     ]])
     try:
         await context.bot.send_message(partner, partner_msg, reply_markup=get_main_keyboard(partner))
@@ -879,19 +877,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── ADMIN PANEL ──
     if text == '\u2699\ufe0f Admin Panel' and uid == ADMIN_ID:
         context.user_data['in_admin_panel'] = True
-        total   = await db_pool.fetchval('SELECT COUNT(*) FROM users')
-        active  = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
-        waiting = await db_pool.fetchval('SELECT COUNT(*) FROM waiting_users')
-        male    = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Male'")
-        female  = await db_pool.fetchval("SELECT COUNT(*) FROM users WHERE gender='Female'")
-        await update.message.reply_text(
-            f'\u2699\ufe0f Admin Panel\n\n'
-            f'\U0001f464 Total users:  {total}\n'
-            f'\U0001f468 Male:         {male}\n'
-            f'\U0001f469 Female:       {female}\n'
-            f'\U0001f4ac Active chats: {active}\n'
-            f'\U0001f50e Searching:    {waiting}',
-            reply_markup=admin_panel_keyboard)
+        await update.message.reply_text('\u2699\ufe0f Admin Panel', reply_markup=admin_panel_keyboard)
         return
 
     if uid == ADMIN_ID and context.user_data.get('in_admin_panel'):
