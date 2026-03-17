@@ -1123,17 +1123,13 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_back_reports_callback, pattern=r'^admin_back_reports$'))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, router))
     async def update_bot_description():
-        """Updates bot short description with live user count every 10 minutes."""
-        while True:
-            try:
-                total  = await db_pool.fetchval('SELECT COUNT(*) FROM users WHERE name IS NOT NULL AND age IS NOT NULL') or 0
-                active = await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
-                await app.bot.set_my_short_description(
-                    f'👥 {total:,} users'
-                )
-            except Exception as e:
-                logger.warning('Could not update bot description: %s', e)
-            await asyncio.sleep(600)  # update every 10 minutes
+        """Sets a clean bot description once on startup."""
+        try:
+            await app.bot.set_my_short_description(
+                '🎭 Chat anonymously with strangers'
+            )
+        except Exception as e:
+            logger.warning('Could not set bot description: %s', e)
 
     logger.info('Bot starting...')
     # Retry initialization — handles temporary network issues on Railway
