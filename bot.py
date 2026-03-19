@@ -76,7 +76,7 @@ admin_panel_keyboard = ReplyKeyboardMarkup(
      ['\U0001f4e2 Announcement'],
      ['\U0001f465 Active Users',   '\U0001f552 Waiting Users'],
      ['\U0001f451 VIP Users',      '\U0001f9f9 Clean Dead Chats'],
-     ['\U0001f6a8 Reports'],
+     ['\U0001f6a8 Reports',        '\U0001f4f1 Live Chats'],
      ['\u2b05\ufe0f Back']],
     resize_keyboard=True)
 vip_keyboard = ReplyKeyboardMarkup(
@@ -141,7 +141,7 @@ BUTTON_TEXTS = {
     '\u26a0\ufe0f Report',
     '\U0001f4ca Analytics', '\U0001f465 Active Users', '\U0001f552 Waiting Users',
     '\U0001f4e2 Announcement', '\U0001f9f9 Clean Dead Chats', '\U0001f451 VIP Users',
-    '\U0001f6a8 Reports',
+    '\U0001f6a8 Reports', '\U0001f4f1 Live Chats',
     'Male', 'Female',
 }
 
@@ -612,6 +612,39 @@ async def delete_blocked_users(update, context):
         f'\U0001f5d1 Deleted (blocked): {deleted}\n'
         f'\U0001f464 Remaining users: {checked - deleted}')
 
+async def nudge_chats_command(update, context):
+    """Send an icebreaker to all currently active chats to spark conversation."""
+    if update.message.from_user.id != ADMIN_ID: return
+
+    pairs = await db_pool.fetch(
+        'SELECT DISTINCT LEAST(user_id,partner_id) as u1, GREATEST(user_id,partner_id) as u2 FROM active_chats')
+
+    if not pairs:
+        await update.message.reply_text('\u274c No active chats right now.'); return
+
+    icebreakers = [
+        '\U0001f4ac Icebreaker: Ask your partner — \"What\'s one thing that always makes you smile?\"',
+        '\U0001f4ac Icebreaker: Ask your partner — \"What\'s the best thing that happened to you this week?\"',
+        '\U0001f4ac Icebreaker: Ask your partner — \"If you could be anywhere right now, where would you be?\"',
+        '\U0001f4ac Icebreaker: Ask your partner — \"What\'s something most people don\'t know about you?\"',
+        '\U0001f4ac Icebreaker: Ask your partner — \"What\'s your go-to comfort when you\'re having a bad day?\"',
+    ]
+
+    import random as _random
+    sent = 0
+    for pair in pairs:
+        msg = _random.choice(icebreakers)
+        for uid in [pair['u1'], pair['u2']]:
+            try:
+                await context.bot.send_message(uid, msg)
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+        sent += 1
+
+    await update.message.reply_text(
+        f'\U0001f4ac Sent icebreakers to {sent} active chat(s)!')
+
 async def debug_referral(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     if not context.args or not context.args[0].isdigit():
@@ -896,6 +929,29 @@ async def admin_back_reports_callback(update, context):
     await q.edit_message_text('\U0001f6a8 Recent Reports:', reply_markup=InlineKeyboardMarkup(buttons))
 
 
+async def admin_end_chat_callback(update, context):
+    """Admin ends a specific active chat from Live Chats panel."""
+    q = update.callback_query
+    if q.from_user.id != ADMIN_ID:
+        await q.answer('Not authorized.', show_alert=True); return
+    await q.answer()
+    parts = q.data.split(':')
+    u1, u2 = int(parts[1]), int(parts[2])
+    # End the chat for both users
+    await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', u1)
+    await db_pool.execute('DELETE FROM active_chats WHERE user_id=$1', u2)
+    context_tod_counts.pop(u1, None); context_tod_counts.pop(u2, None)
+    # Notify both users
+    end_msg = ('\u274c Your chat has been ended by the admin.\n\n'
+               'Press \U0001f680 Find Partner to start a new chat.')
+    for uid in [u1, u2]:
+        try:
+            r = await db_pool.fetchrow('SELECT name FROM users WHERE user_id=$1', uid)
+            await context.bot.send_message(uid, end_msg)
+        except Exception:
+            pass
+    await q.edit_message_text(f'\u2705 Chat between {u1} and {u2} has been ended.')
+
 async def find_new_callback(update, context):
     """Find New inline button — just answer the query, user uses keyboard to search."""
     q = update.callback_query
@@ -1052,6 +1108,34 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"admin_report:{r['reported_id']}:{r['reporter_id']}")])
             await update.message.reply_text('\U0001f6a8 Recent Reports (tap to review):', reply_markup=InlineKeyboardMarkup(buttons))
             return
+        if text == '\U0001f4f1 Live Chats':
+            pairs = await db_pool.fetch(
+                '''SELECT DISTINCT LEAST(user_id,partner_id) AS u1,
+                          GREATEST(user_id,partner_id) AS u2
+                   FROM active_chats ORDER BY u1''')
+            if not pairs:
+                await update.message.reply_text('\u274c No active chats right now.')
+                return
+            buttons = []
+            lines   = ['\U0001f4f1 Live Chats\n']
+            for i, pair in enumerate(pairs):
+                u1, u2 = pair['u1'], pair['u2']
+                r1 = await db_pool.fetchrow('SELECT name, gender FROM users WHERE user_id=$1', u1)
+                r2 = await db_pool.fetchrow('SELECT name, gender FROM users WHERE user_id=$1', u2)
+                n1 = (r1['name'] or '?') if r1 else '?'
+                n2 = (r2['name'] or '?') if r2 else '?'
+                g1 = ('\U0001f468' if (r1 and r1['gender']=='Male') else '\U0001f469') if r1 else '\U0001f464'
+                g2 = ('\U0001f468' if (r2 and r2['gender']=='Male') else '\U0001f469') if r2 else '\U0001f464'
+                lines.append(f'{i+1}. {g1} {n1}  \u2194\ufe0f  {g2} {n2}')
+                buttons.append([InlineKeyboardButton(
+                    f'\U0001f6ab End chat #{i+1}: {n1} & {n2}',
+                    callback_data=f'admin_end_chat:{u1}:{u2}'
+                )])
+            await update.message.reply_text(
+                '\n'.join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons))
+            return
+
         if text == '\U0001f451 VIP Users':
             rows = await db_pool.fetch(
                 "SELECT user_id,username,name,vip_expiry,referral_count FROM users WHERE (is_vip=TRUE AND vip_expiry IS NULL) OR vip_expiry>NOW() ORDER BY vip_expiry ASC NULLS FIRST LIMIT 20")
@@ -1237,11 +1321,13 @@ async def main():
     app.add_handler(CommandHandler('fixvip',     fixvip_command))
     app.add_handler(CommandHandler('vipfemales', vipfemales_command))
     app.add_handler(CommandHandler('deleteblocked', delete_blocked_users))
+    app.add_handler(CommandHandler('nudge',        nudge_chats_command))
     app.add_handler(CommandHandler('deleteblocked', delete_blocked_command))
     app.add_handler(CommandHandler('delete',     delete_blocked_users))
     app.add_handler(CommandHandler('deleteblocked', delete_blocked_users))
     app.add_handler(CommandHandler('stats',      stats_command))
     app.add_handler(CommandHandler('update',     update_command))
+    app.add_handler(CallbackQueryHandler(admin_end_chat_callback,  pattern=r'^admin_end_chat:'))
     app.add_handler(CallbackQueryHandler(find_new_callback,       pattern=r'^find_new$'))
     app.add_handler(CallbackQueryHandler(announce_target_callback, pattern=r'^announce_target:'))
     app.add_handler(CallbackQueryHandler(report_callback,             pattern=r'^report:'))
