@@ -94,7 +94,7 @@ admin_panel_keyboard = ReplyKeyboardMarkup(
      ['\u2b05\ufe0f Back']],
     resize_keyboard=True)
 vip_keyboard = ReplyKeyboardMarkup(
-    [['\U0001f381 Get FREE VIP', '\u2b50 Buy VIP', '\u2b50 Buy VIP'],
+    [['\U0001f381 Get FREE VIP', '\u2b50 Buy VIP'],
      ['\u2b05\ufe0f Back']],
     resize_keyboard=True)
 
@@ -190,7 +190,7 @@ DARE_CHALLENGES = [
 
 BUTTON_TEXTS = {
     '\U0001f680 Find Partner', '\U0001f468 Find Male', '\U0001f469 Find Female',
-    '\u23ed\ufe0f Next', '\u274c Stop', '\U0001f48e VIP', '\U0001f381 Get FREE VIP', '\u2b50 Buy VIP', '\u2b50 Buy VIP',
+    '\u23ed\ufe0f Next', '\u274c Stop', '\U0001f48e VIP', '\U0001f381 Get FREE VIP', '\u2b50 Buy VIP',
     '\u2b05\ufe0f Back', '\u2699\ufe0f Admin Panel',
     '\u26a0\ufe0f Report',
     '\U0001f4ca Analytics', '\U0001f465 Active Users', '\U0001f552 Waiting Users',
@@ -1076,34 +1076,6 @@ async def admin_end_chat_callback(update, context):
             pass
     await q.edit_message_text(f'\u2705 Chat between {u1} and {u2} has been ended.')
 
-async def buy_vip_callback(update, context):
-    """Send a Telegram Stars invoice for VIP."""
-    q = update.callback_query
-    uid = q.from_user.id
-    await q.answer()
-    if q.data == 'buy_vip:week':
-        title       = '⭐ 1 Week VIP'
-        description = 'Unlock VIP for 7 days. Filter by gender, unlimited Truth or Dare, priority matching.'
-        payload     = 'vip_week'
-        stars       = 50
-        days        = 7
-    else:
-        title       = '⭐ 1 Month VIP'
-        description = 'Unlock VIP for 30 days. Filter by gender, unlimited Truth or Dare, priority matching.'
-        payload     = 'vip_month'
-        stars       = 100
-        days        = 30
-    try:
-        await context.bot.send_invoice(
-            chat_id     = uid,
-            title       = title,
-            description = description,
-            payload     = payload,
-            currency    = 'XTR',
-            prices      = [{'label': title, 'amount': stars}],
-        )
-    except Exception as e:
-        await context.bot.send_message(uid, f'⚠️ Could not create invoice: {e}')
 
 async def handle_pre_checkout(update, context):
     """Always approve pre-checkout for VIP purchases."""
@@ -1134,37 +1106,6 @@ async def handle_successful_payment(update, context):
         f'\u2022 Unlimited Truth or Dare\n\n'
         f'Enjoy your VIP! \U0001f48e',
         reply_markup=user_keyboard)
-
-async def buy_vip_callback(update, context):
-    """Show VIP purchase options as invoice."""
-    q = update.callback_query
-    uid = q.from_user.id
-    await q.answer()
-
-    parts = q.data.split(':')
-    package = parts[1]  # 'week' or 'month'
-
-    if package == 'week':
-        title       = '\U0001f451 VIP — 1 Week'
-        description = 'Unlock gender filter, VIP matching and unlimited Truth or Dare for 7 days.'
-        price       = VIP_WEEK_PRICE
-        days        = 7
-    else:
-        title       = '\U0001f451 VIP — 1 Month'
-        description = 'Unlock gender filter, VIP matching and unlimited Truth or Dare for 30 days.'
-        price       = VIP_MONTH_PRICE
-        days        = 30
-
-    await context.bot.send_invoice(
-        chat_id     = uid,
-        title       = title,
-        description = description,
-        payload     = f'vip_{package}_{uid}_{days}',
-        currency    = 'XTR',
-        prices      = [{'label': title, 'amount': price}],
-    )
-    try: await q.edit_message_text('\U0001f4e8 Invoice sent! Complete the payment below \U0001f447')
-    except: pass
 
 
 async def precheckout_callback(update, context):
@@ -1214,40 +1155,6 @@ async def testvip_command(update, context):
         'VIP will be granted for 1 day on success.')
 
 
-async def buy_vip_callback(update, context):
-    """Send invoice when user picks a VIP plan."""
-    q   = update.callback_query
-    uid = q.from_user.id
-    await q.answer()
-
-    plan = q.data.split(':')[1]  # week / month / test
-
-    if plan == 'week':
-        title       = '\U0001f451 1 Week VIP'
-        description = 'Unlock VIP for 7 days:\n\u2022 Filter by gender\n\u2022 Unlimited Truth or Dare\n\u2022 Priority matching'
-        stars       = VIP_WEEK_STARS
-        payload     = 'vip_week'
-    elif plan == 'month':
-        title       = '\U0001f451 1 Month VIP'
-        description = 'Unlock VIP for 30 days:\n\u2022 Filter by gender\n\u2022 Unlimited Truth or Dare\n\u2022 Priority matching'
-        stars       = VIP_MONTH_STARS
-        payload     = 'vip_month'
-    else:  # test — admin only
-        if uid != ADMIN_ID:
-            await q.answer('Not authorized.', show_alert=True); return
-        title       = '\U0001f9ea Test VIP Payment'
-        description = 'Admin test — grants 1 day VIP'
-        stars       = VIP_TEST_STARS
-        payload     = 'vip_test'
-
-    await context.bot.send_invoice(
-        chat_id=uid,
-        title=title,
-        description=description,
-        payload=payload,
-        currency='XTR',
-        prices=[{'label': title, 'amount': stars}],
-    )
 
 async def precheckout_callback(update, context):
     """Approve all VIP pre-checkout queries."""
@@ -1675,25 +1582,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('\U0001f381 Want FREE VIP instead? Invite friends:', reply_markup=vip_keyboard)
         return
 
-    if text == '\u2b50 Buy VIP':
-        await update.message.reply_text(
-            '\u2b50 Choose your VIP plan:\n\n'
-            '\U0001f4c5 1 Week — 50 Stars\n'
-            '\U0001f4c6 1 Month — 100 Stars\n\n'
-            '\U0001f4b3 Pay instantly with Telegram Stars!',
-            reply_markup=buy_vip_inline(uid))
-        return
-
-    if text == '\u2b50 Buy VIP':
-        is_admin = uid == ADMIN_ID
-        await update.message.reply_text(
-            '\U0001f451 Choose your VIP package:\n\n'
-            '\u2b50 *1 Week VIP* — 50 Stars\n'
-            '\U0001f31f *1 Month VIP* — 100 Stars\n\n'
-            '_Pay instantly with Telegram Stars_ \U0001f4b0',
-            parse_mode='Markdown',
-            reply_markup=buy_vip_inline(uid, is_admin=is_admin))
-        return
 
     if text == '\U0001f381 Get FREE VIP':
         r = await db_pool.fetchrow('SELECT referral_count FROM users WHERE user_id=$1', uid)
@@ -1706,62 +1594,34 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'\U0001f3c6 VIPs earned: {cnt//VIP_REFERRAL_THRESHOLD}\n\n'
             f'Invite {rem} more for \U0001f451 VIP ({VIP_REFERRAL_DAYS} days)!')
         return
+
     if text == '\u2b50 Buy VIP':
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton('\u2b50 1 Week VIP — 50 Stars',  callback_data='buy_vip:week'),
-            InlineKeyboardButton('\u2b50 1 Month VIP — 100 Stars', callback_data='buy_vip:month'),
-        ]])
-        await update.message.reply_text(
-            '\u2b50 Buy VIP\n\n'
-            '\U0001f4b3 Pay with Telegram Stars:\n\n'
-            '\U0001f4c5 1 Week  — 50 Stars\n'
-            '\U0001f4c6 1 Month — 100 Stars\n\n'
-            'Tap a package to pay instantly:',
-            reply_markup=markup)
-        return
-    if text == '\u2b50 Buy VIP':
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton('\u2b50 1 Week VIP — 50 Stars',  callback_data='buy_vip:week')],
-            [InlineKeyboardButton('\u2b50 1 Month VIP — 100 Stars', callback_data='buy_vip:month')],
-        ])
-        await update.message.reply_text(
-            '\u2b50 Choose your VIP package:\n\n'
-            '1 Week — 50 ⭐ Stars\n'
-            '1 Month — 100 ⭐ Stars\n\n'
-            'Payment is instant via Telegram Stars.',
-            reply_markup=markup)
-        return
-    if text == '\u2b50 Buy VIP':
-        await update.message.reply_text(
-            '\U0001f451 Choose your VIP package:\n\n'
-            '\u2b50 *1 Week VIP* — 50 Stars\n'
-            '\u2022 Filter by gender\n'
-            '\u2022 Unlimited Truth or Dare\n'
-            '\u2022 VIP priority matching\n\n'
-            '\u2b50 *1 Month VIP* — 100 Stars\n'
-            '\u2022 Everything above for 30 days\n\n'
-            '100 Stars \u2248 $1.99 USD',
-            parse_mode='Markdown',
-            reply_markup=buy_vip_inline())
-        return
-    if text == '\u2b50 Buy VIP':
-        week_price  = 50
-        month_price = 100
         buttons = [
-            [InlineKeyboardButton(f'\u2b50 1 Week VIP — {week_price} Stars',  callback_data='buy_vip:week')],
-            [InlineKeyboardButton(f'\u2b50 1 Month VIP — {month_price} Stars', callback_data='buy_vip:month')],
+            [InlineKeyboardButton(
+                f"\u2b50 {VIP_PACKAGES['week']['label']} — {VIP_PACKAGES['week']['stars']} Stars",
+                callback_data='buy_vip:week')],
+            [InlineKeyboardButton(
+                f"\U0001f31f {VIP_PACKAGES['month']['label']} — {VIP_PACKAGES['month']['stars']} Stars",
+                callback_data='buy_vip:month')],
         ]
         if uid == ADMIN_ID:
-            buttons.append([InlineKeyboardButton('\U0001f9ea Test — 1 Star (Admin Only)', callback_data='buy_vip:test')])
+            buttons.append([InlineKeyboardButton(
+                f"\U0001f9ea {VIP_PACKAGES['test']['label']} — {VIP_PACKAGES['test']['stars']} Star",
+                callback_data='buy_vip:test')])
         await update.message.reply_text(
-            '\u2b50 Choose your VIP package:\n\n'
-            '\U0001f4c5 1 Week VIP — 50 Stars\n'
-            '\U0001f4c6 1 Month VIP — 100 Stars\n\n'
-            '\U0001f4b3 Payment via Telegram Stars\n'
-            '\U0001f512 Instant activation after payment',
+            '\u2b50 Choose your VIP package\n\n'
+            '\U0001f4c5 *1 Week VIP — 50 Stars*\n'
+            '\u2022 \U0001f469 Filter by gender (Male/Female)\n'
+            '\u2022 \U0001f3b2 Unlimited Truth or Dare\n'
+            '\u2022 \U0001f3c6 Top priority matching\n\n'
+            '\U0001f4c6 *1 Month VIP — 100 Stars*\n'
+            '\u2022 All 1 Week perks\n'
+            '\u2022 \U0001f48e VIP badge visible to partners\n'
+            '\u2022 \U0001f4b0 Best value!\n\n'
+            '\u2b50 Pay with Telegram Stars — instant activation',
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons))
         return
-
     if text == '\U0001f451 Contact Admin': await update.message.reply_text('\U0001f451 Contact Admin: @Random1204'); return
 
     if text == '\U0001f4b3 Buy VIP':
