@@ -1216,23 +1216,38 @@ async def buy_vip_callback(update, context):
         await q.answer('Not available.', show_alert=True); return
 
     try:
+        # Build description based on package
+        if pkg_key == 'week':
+            desc = (
+                "WHAT YOU GET:\n"
+                "• Match with Males or Females only\n"
+                "• Unlimited Truth or Dare rounds\n"
+                "• Top priority in matching queue\n"
+                "• VIP badge shown to your partner\n\n"
+                "Duration: 7 days\n"
+                "Activates instantly after payment"
+            )
+        elif pkg_key == 'month':
+            desc = (
+                "WHAT YOU GET:\n"
+                "• Match with Males or Females only\n"
+                "• Unlimited Truth or Dare rounds\n"
+                "• Top priority in matching queue\n"
+                "• VIP badge shown to your partner\n\n"
+                "Duration: 30 days — Best Value!\n"
+                "Activates instantly after payment"
+            )
+        else:
+            desc = "Admin test payment — 1 Star only"
+
         await context.bot.send_invoice(
             chat_id=uid,
-            title=f"{pkg['emoji']} {pkg['label']}",
-            description=(
-                f"Unlock {pkg['label']} on Fun Bot!\n\n"
-                f"\u2705 Filter by gender (Male/Female)\n"
-                f"\u2705 Unlimited Truth or Dare\n"
-                f"\u2705 Priority matching\n"
-                f"\u2705 VIP badge visible to partners"
-            ),
+            title=f"{pkg['emoji']} {pkg['label']} — Fun Bot",
+            description=desc,
             payload=f"vip_{pkg_key}_{uid}",
             provider_token="",   # empty for Telegram Stars
             currency="XTR",
             prices=[{"label": pkg['label'], "amount": pkg['stars']}],
-            photo_url="https://telegra.ph/file/a9b5e8c3c48df90e7e476.jpg",
-            photo_width=800,
-            photo_height=400,
         )
         await q.edit_message_text(
             f"{pkg['emoji']} Invoice sent!\n\n"
