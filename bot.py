@@ -1379,12 +1379,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text('Please select your gender:', reply_markup=gender_keyboard)
                 return
             if step == 'country':
-                if text and text not in BUTTON_TEXTS:
+                # Reject digits-only input so numbers don't bypass to age
+                if text and text not in BUTTON_TEXTS and not text.strip().isdigit():
                     await db_pool.execute('UPDATE users SET country=$1 WHERE user_id=$2', text, uid)
                     context.user_data['step'] = 'age'
                     await update.message.reply_text('Enter your age:')
                 else:
-                    await update.message.reply_text('Please enter your country:')
+                    await update.message.reply_text('Please enter your country name (e.g. India, USA):')
                 return
             if step == 'age':
                 if text and text.isdigit() and 5 <= int(text) <= 120:
@@ -1593,8 +1594,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f'Buy instantly with Stars \u2b50\n'
                 f'Or get FREE via referrals \U0001f381'
             )
-        await update.message.reply_text(status_msg, reply_markup=vip_buy_inline())
-        await update.message.reply_text('\U0001f381 Want FREE VIP instead? Invite friends:', reply_markup=vip_keyboard)
+        await update.message.reply_text(status_msg, reply_markup=vip_keyboard)
         return
 
 
