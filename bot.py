@@ -1020,6 +1020,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if uid == ADMIN_ID and context.user_data.get('in_admin_panel'):
+        pass  # flag set, handled below
+    elif uid == ADMIN_ID and text in {
+        '\U0001f4ca Analytics', '\U0001f465 Active Users', '\U0001f552 Waiting Users',
+        '\U0001f451 VIP Users', '\U0001f9f9 Clean Dead Chats',
+        '\U0001f6a8 Reports', '\U0001f4f1 Live Chats', '\U0001f4e2 Announcement',
+    }:
+        context.user_data['in_admin_panel'] = True  # restore flag on restart
+
+    if uid == ADMIN_ID and context.user_data.get('in_admin_panel'):
         if text == '📊 Analytics':
             total = await db_pool.fetchval('SELECT COUNT(*) FROM users')
             active= await db_pool.fetchval('SELECT COUNT(DISTINCT LEAST(user_id,partner_id)) FROM active_chats') or 0
